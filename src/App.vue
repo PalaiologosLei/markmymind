@@ -22,7 +22,6 @@ import {
   createTask,
   differenceInDays,
   endDate,
-  ensureTaskSubtasks,
   normalizeDuration,
   normalizeProgress,
   parseGanttSource,
@@ -46,6 +45,8 @@ interface DragState {
   subtaskId: string;
   mode: DragMode;
   startX: number;
+  pointerX: number;
+  pointerY: number;
   initialStart: string;
   initialDuration: number;
 }
@@ -93,6 +94,7 @@ const subtaskNameEditor = ref<HTMLInputElement | null>(null);
 const copiedSubtask = ref<GanttSubtask | null>(null);
 
 const scaleOptions: Array<{ value: GanttScale; label: string }> = [
+  { value: "day", label: "天" },
   { value: "week", label: "周" },
   { value: "month", label: "月" },
   { value: "quarter", label: "季" },
@@ -126,6 +128,10 @@ const visibleStart = computed(() => renderRange.value.start);
 const visibleDayCount = computed(() => renderRange.value.days);
 
 const dayWidth = computed(() => {
+  if (doc.value.view === "day") {
+    return 220;
+  }
+
   if (doc.value.view === "week") {
     return 96;
   }
@@ -341,7 +347,7 @@ function selectTask(task: GanttTask | undefined, subtask?: GanttSubtask) {
   }
 
   selectedTaskId.value = task.id;
-  selectedSubtaskId.value = subtask?.id ?? ensureTaskSubtasks(task)[0]?.id ?? "";
+  selectedSubtaskId.value = subtask?.id ?? task.subtasks[0]?.id ?? "";
 }
 
 function selectSubtask(task: GanttTask, subtask: GanttSubtask) {
@@ -414,7 +420,7 @@ function deleteSelectedSubtask() {
   const task = selectedTask.value;
   const subtask = selectedSubtask.value;
 
-  if (!task || !subtask || task.subtasks.length <= 1) {
+  if (!task || !subtask) {
     return;
   }
 
@@ -457,6 +463,8 @@ function beginSubtaskDrag(event: PointerEvent, task: GanttTask, subtask: GanttSu
     subtaskId: subtask.id,
     mode,
     startX: event.clientX,
+    pointerX: event.clientX,
+    pointerY: event.clientY,
     initialStart: subtask.start,
     initialDuration: subtask.duration,
   };
@@ -471,6 +479,9 @@ function updateSubtaskDrag(event: PointerEvent) {
   if (!drag) {
     return;
   }
+
+  drag.pointerX = event.clientX;
+  drag.pointerY = event.clientY;
 
   const task = doc.value.tasks.find((item) => item.id === drag.taskId);
   const subtask = task?.subtasks.find((item) => item.id === drag.subtaskId);
@@ -489,9 +500,60 @@ function updateSubtaskDrag(event: PointerEvent) {
   subtask.duration = normalizeDuration(drag.initialDuration + deltaDays);
 }
 
-function endSubtaskDrag() {
+function endSubtaskDrag(event?: PointerEvent) {
+  if (dragState.value?.mode === "move") {
+    moveDraggedSubtaskToDropTarget(
+      event ? { pointerX: event.clientX, pointerY: event.clientY } : dragState.value,
+    );
+  }
+
   dragState.value = null;
   window.removeEventListener("pointermove", updateSubtaskDrag);
+}
+
+function moveDraggedSubtaskToDropTarget(pointer: Pick<DragState, "pointerX" | "pointerY">) {
+  const drag = dragState.value;
+
+  if (!drag) {
+    return;
+  }
+
+  const sourceTask = doc.value.tasks.find((task) => task.id === drag.taskId);
+  const targetTask = taskFromTimelinePoint(pointer.pointerX, pointer.pointerY);
+
+  if (!sourceTask || !targetTask || sourceTask.id === targetTask.id || targetTask.locked) {
+    return;
+  }
+
+  const subtaskIndex = sourceTask.subtasks.findIndex((subtask) => subtask.id === drag.subtaskId);
+
+  if (subtaskIndex < 0) {
+    return;
+  }
+
+  const [subtask] = sourceTask.subtasks.splice(subtaskIndex, 1);
+  targetTask.subtasks.push(subtask);
+  selectSubtask(targetTask, subtask);
+  statusMessage.value = `已将子任务 ${subtask.name} 移动到 ${targetTask.name}`;
+}
+
+function taskFromTimelinePoint(clientX: number, clientY: number) {
+  const pane = timelinePane.value;
+
+  if (!pane) {
+    return null;
+  }
+
+  const rect = pane.getBoundingClientRect();
+
+  if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+    return null;
+  }
+
+  const yInBody = clientY - rect.top + pane.scrollTop - 76;
+  const index = Math.floor(yInBody / TASK_ROW_HEIGHT);
+
+  return index >= 0 ? doc.value.tasks[index] ?? null : null;
 }
 
 function beginTimelinePan(event: PointerEvent) {
@@ -620,7 +682,7 @@ function deleteSubtaskFromContext() {
   const task = contextTask();
   const subtask = contextSubtask();
 
-  if (!task || !subtask || task.subtasks.length <= 1) {
+  if (!task || !subtask) {
     closeContextMenu();
     return;
   }
@@ -1046,7 +1108,7 @@ function isEditableTarget(target: EventTarget | null) {
       @click.stop
     >
       <button type="button" @click="addSubtaskFromContext">添加子任务</button>
-      <button type="button" :disabled="!contextMenu.subtaskId || (selectedTask?.subtasks.length ?? 0) <= 1" @click="deleteSubtaskFromContext">
+      <button type="button" :disabled="!contextMenu.subtaskId" @click="deleteSubtaskFromContext">
         删除子任务
       </button>
     </div>

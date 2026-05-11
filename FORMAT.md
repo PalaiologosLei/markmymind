@@ -26,6 +26,7 @@ gantt
 - 标题、日期格式、坐标格式使用 Mermaid 原生命令。
 - 主任务写作 `主任务名 :task, task-id`。
 - 子任务线写作 `子任务名 :subtask, task-id, subtask-id, YYYY-MM-DD, Nd`。
+- `view` 支持 `day`、`week`、`month`、`quarter`、`year`。
 - MarkMyMind 元数据使用 `%% markmymind:* {json}` 注释行。
 - 旧的 Mermaid 原生任务行仍会被兼容读取，并自动转换为“主任务 + 一个同名子任务”。
 - 保存时会输出规范化源码；暂不支持的 Mermaid 行会在打开时给出解析提醒。

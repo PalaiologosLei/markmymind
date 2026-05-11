@@ -1,4 +1,4 @@
-export type GanttScale = "week" | "month" | "quarter" | "year";
+export type GanttScale = "day" | "week" | "month" | "quarter" | "year";
 export type GanttStatus = "todo" | "active" | "done" | "critical" | "milestone";
 
 export interface GanttSubtask {
@@ -161,11 +161,15 @@ export function maxIso(values: string[]): string {
 }
 
 export function taskStart(task: GanttTask): string {
-  return minIso(ensureTaskSubtasks(task).map((subtask) => subtask.start));
+  const starts = ensureTaskSubtasks(task).map((subtask) => subtask.start);
+
+  return starts.length ? minIso(starts) : todayIso();
 }
 
 export function taskEnd(task: GanttTask): string {
-  return maxIso(ensureTaskSubtasks(task).map((subtask) => endDate(subtask)));
+  const ends = ensureTaskSubtasks(task).map((subtask) => endDate(subtask));
+
+  return ends.length ? maxIso(ends) : todayIso();
 }
 
 export function createSampleDocument(): GanttDocument {
@@ -422,11 +426,6 @@ export function createSubtask(
 }
 
 export function ensureTaskSubtasks(task: GanttTask): GanttSubtask[] {
-  if (task.subtasks.length) {
-    return task.subtasks;
-  }
-
-  task.subtasks.push(createSubtask(1, 1, task.name, todayIso(), task.color));
   return task.subtasks;
 }
 
@@ -668,7 +667,7 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
 }
 
 function isGanttScale(value: unknown): value is GanttScale {
-  return value === "week" || value === "month" || value === "quarter" || value === "year";
+  return value === "day" || value === "week" || value === "month" || value === "quarter" || value === "year";
 }
 
 function isGanttStatus(value: unknown): value is GanttStatus {
