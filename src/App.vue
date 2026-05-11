@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -72,6 +72,7 @@ interface UnitSegment {
 }
 
 const TASK_ROW_HEIGHT = 72;
+const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
 
 const doc = ref<GanttDocument>(createSampleDocument());
 const currentPath = ref<string | null>(null);
@@ -86,6 +87,10 @@ const dragState = ref<DragState | null>(null);
 const panState = ref<PanState | null>(null);
 const contextMenu = ref<ContextMenuState | null>(null);
 const timelinePane = ref<HTMLElement | null>(null);
+const editingSubtaskId = ref<string | null>(null);
+const editingSubtaskName = ref("");
+const subtaskNameEditor = ref<HTMLInputElement | null>(null);
+const copiedSubtask = ref<GanttSubtask | null>(null);
 
 const scaleOptions: Array<{ value: GanttScale; label: string }> = [
   { value: "week", label: "周" },
@@ -197,6 +202,21 @@ const todayLineStyle = computed(() => {
   };
 });
 
+onMounted(async () => {
+  window.addEventListener("keydown", handleGlobalKeydown);
+
+  const restored = await restoreLastOpenedFile();
+  await nextTick();
+
+  if (!restored) {
+    jumpToToday();
+  }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleGlobalKeydown);
+});
+
 async function newDocument() {
   if (isDirty.value && !window.confirm("当前文件尚未保存，确定新建吗？")) {
     return;
@@ -223,18 +243,42 @@ async function openDocument() {
     return;
   }
 
-  const content = await invoke<string>("read_gantt_file", { path: selected });
+  await loadDocumentFromPath(selected);
+  window.localStorage.setItem(LAST_FILE_PATH_KEY, selected);
+  await nextTick();
+  scrollToTaskRange();
+}
+
+async function loadDocumentFromPath(path: string) {
+  const content = await invoke<string>("read_gantt_file", { path });
   const result = parseGanttSource(content);
 
   doc.value = result.doc;
-  currentPath.value = selected;
+  currentPath.value = path;
   selectTask(doc.value.tasks[0]);
   warnings.value = result.warnings;
   lastSavedSource.value = content;
   refreshSourceDraft();
-  statusMessage.value = `已打开 ${fileName(selected)}`;
-  await nextTick();
-  scrollToTaskRange();
+  statusMessage.value = `已打开 ${fileName(path)}`;
+}
+
+async function restoreLastOpenedFile() {
+  const path = window.localStorage.getItem(LAST_FILE_PATH_KEY);
+
+  if (!path) {
+    return false;
+  }
+
+  try {
+    await loadDocumentFromPath(path);
+    await nextTick();
+    jumpToToday();
+    return true;
+  } catch {
+    window.localStorage.removeItem(LAST_FILE_PATH_KEY);
+    statusMessage.value = "上次打开的文件不可用，已创建新甘特图";
+    return false;
+  }
 }
 
 async function saveDocument() {
@@ -245,6 +289,7 @@ async function saveDocument() {
 
   await invoke("write_gantt_file", { path: currentPath.value, content: sourceText.value });
   lastSavedSource.value = sourceText.value;
+  window.localStorage.setItem(LAST_FILE_PATH_KEY, currentPath.value);
   statusMessage.value = `已保存 ${fileName(currentPath.value)}`;
 }
 
@@ -301,6 +346,81 @@ function selectTask(task: GanttTask | undefined, subtask?: GanttSubtask) {
 
 function selectSubtask(task: GanttTask, subtask: GanttSubtask) {
   selectTask(task, subtask);
+}
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    finishSubtaskNameEdit();
+    void saveDocument();
+    return;
+  }
+
+  if (isEditableTarget(event.target)) {
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+    event.preventDefault();
+    copySelectedSubtask();
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+    event.preventDefault();
+    pasteCopiedSubtask();
+    return;
+  }
+
+  if (event.key === "Backspace" || event.key === "Delete") {
+    event.preventDefault();
+    deleteSelectedSubtask();
+  }
+}
+
+function copySelectedSubtask() {
+  const subtask = selectedSubtask.value;
+
+  if (!subtask) {
+    return;
+  }
+
+  copiedSubtask.value = { ...subtask };
+  statusMessage.value = `已复制子任务 ${subtask.name}`;
+}
+
+function pasteCopiedSubtask() {
+  const source = copiedSubtask.value;
+  const targetTask = selectedTask.value;
+
+  if (!source || !targetTask) {
+    return;
+  }
+
+  const subtask = createSubtask(
+    doc.value.tasks.indexOf(targetTask) + 1,
+    targetTask.subtasks.length + 1,
+    source.name,
+    endDate(source),
+    source.color || targetTask.color,
+  );
+  subtask.duration = normalizeDuration(source.duration);
+  targetTask.subtasks.push(subtask);
+  selectSubtask(targetTask, subtask);
+  statusMessage.value = `已粘贴子任务 ${subtask.name}`;
+}
+
+function deleteSelectedSubtask() {
+  const task = selectedTask.value;
+  const subtask = selectedSubtask.value;
+
+  if (!task || !subtask || task.subtasks.length <= 1) {
+    return;
+  }
+
+  task.subtasks = task.subtasks.filter((item) => item.id !== subtask.id);
+  selectTask(task, task.subtasks[0]);
+  statusMessage.value = `已删除子任务 ${subtask.name}`;
 }
 
 function setScale(scale: GanttScale) {
@@ -416,6 +536,7 @@ function endTimelinePan() {
 
 function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubtask) {
   event.preventDefault();
+  finishSubtaskNameEdit();
   selectTask(task, subtask);
   contextMenu.value = {
     x: event.clientX,
@@ -426,15 +547,47 @@ function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubt
   };
 }
 
-function renameSubtask(task: GanttTask, subtask: GanttSubtask) {
-  const nextName = window.prompt("编辑子任务名", subtask.name);
+function startSubtaskNameEdit(task: GanttTask, subtask: GanttSubtask) {
+  selectSubtask(task, subtask);
+  editingSubtaskId.value = subtask.id;
+  editingSubtaskName.value = subtask.name;
+  nextTick(() => {
+    subtaskNameEditor.value?.focus();
+    subtaskNameEditor.value?.select();
+  });
+}
 
-  if (!nextName) {
+function finishSubtaskNameEdit() {
+  if (!editingSubtaskId.value) {
     return;
   }
 
-  subtask.name = nextName.trim() || subtask.name;
-  selectSubtask(task, subtask);
+  const subtask = findSubtaskById(editingSubtaskId.value);
+
+  if (subtask) {
+    const nextName = editingSubtaskName.value.trim();
+    subtask.name = nextName || subtask.name;
+  }
+
+  editingSubtaskId.value = null;
+  editingSubtaskName.value = "";
+}
+
+function cancelSubtaskNameEdit() {
+  editingSubtaskId.value = null;
+  editingSubtaskName.value = "";
+}
+
+function findSubtaskById(id: string) {
+  for (const task of doc.value.tasks) {
+    const subtask = task.subtasks.find((item) => item.id === id);
+
+    if (subtask) {
+      return subtask;
+    }
+  }
+
+  return null;
 }
 
 function closeContextMenu() {
@@ -657,6 +810,14 @@ function statusColorMap() {
     milestone: statusColor("milestone"),
   };
 }
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+}
 </script>
 
 <template>
@@ -782,23 +943,37 @@ function statusColorMap() {
                     :style="segmentStyle(segment)"
                   ></div>
 
-                  <button
+                  <div
                     v-for="subtask in task.subtasks"
                     :key="subtask.id"
-                    type="button"
+                    role="button"
+                    tabindex="0"
                     class="subtask-bar"
                     :class="{ locked: task.locked, selected: subtask.id === selectedSubtaskId }"
                     :style="subtaskBarStyle(task, subtask)"
                     :title="`${task.name} / ${subtask.name}: ${subtask.start} - ${endDate(subtask)}`"
                     @click.stop="selectSubtask(task, subtask)"
-                    @dblclick.stop="renameSubtask(task, subtask)"
+                    @dblclick.stop="startSubtaskNameEdit(task, subtask)"
                     @contextmenu.stop="openContextMenu($event, task, subtask)"
                     @pointerdown="beginSubtaskDrag($event, task, subtask, 'move')"
                   >
-                    <span>{{ subtask.name }}</span>
-                    <span>{{ subtask.duration }} 天</span>
+                    <input
+                      v-if="editingSubtaskId === subtask.id"
+                      ref="subtaskNameEditor"
+                      v-model="editingSubtaskName"
+                      class="subtask-name-editor"
+                      aria-label="子任务名"
+                      @blur="finishSubtaskNameEdit"
+                      @click.stop
+                      @dblclick.stop
+                      @keydown.enter.stop.prevent="finishSubtaskNameEdit"
+                      @keydown.esc.stop.prevent="cancelSubtaskNameEdit"
+                      @pointerdown.stop
+                    />
+                    <span v-else>{{ subtask.name }}</span>
+                    <span v-if="subtask.duration >= 3">{{ subtask.duration }} 天</span>
                     <i class="resize-handle" title="调整工期" @pointerdown.stop="beginSubtaskDrag($event, task, subtask, 'resize')"></i>
-                  </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1308,6 +1483,19 @@ button.primary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.subtask-name-editor {
+  min-width: 0;
+  width: 100%;
+  height: 24px;
+  border: 0;
+  border-radius: 5px;
+  outline: 0;
+  padding: 0 6px;
+  color: #1e2b3a;
+  background: rgba(255, 255, 255, 0.92);
+  font-weight: 700;
 }
 
 .resize-handle {
