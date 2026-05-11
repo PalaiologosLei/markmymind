@@ -23,7 +23,6 @@ import {
   differenceInDays,
   endDate,
   normalizeDuration,
-  normalizeProgress,
   parseGanttSource,
   parseIso,
   renderRangeAroundToday,
@@ -33,7 +32,6 @@ import {
   todayIso,
   type GanttDocument,
   type GanttScale,
-  type GanttStatus,
   type GanttSubtask,
   type GanttTask,
 } from "./domain/gantt";
@@ -75,7 +73,6 @@ interface UnitSegment {
 const TASK_ROW_HEIGHT = 72;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
-const WEEK_TWO_DAY_WIDTH = 192;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
 
 const doc = ref<GanttDocument>(createSampleDocument());
@@ -102,14 +99,6 @@ const scaleOptions: Array<{ value: GanttScale; label: string }> = [
   { value: "month", label: "月" },
   { value: "quarter", label: "季" },
   { value: "year", label: "年" },
-];
-
-const statusOptions: Array<{ value: GanttStatus; label: string }> = [
-  { value: "todo", label: "待办" },
-  { value: "active", label: "进行中" },
-  { value: "done", label: "完成" },
-  { value: "critical", label: "关键" },
-  { value: "milestone", label: "里程碑" },
 ];
 
 const sourceText = computed(() => serializeGanttDocument(doc.value));
@@ -828,25 +817,7 @@ function baseSubtaskWidth(subtask: GanttSubtask) {
 }
 
 function renderedSubtaskWidth(subtask: GanttSubtask) {
-  const baseWidth = baseSubtaskWidth(subtask);
-
-  if (editingSubtaskId.value === subtask.id) {
-    return Math.max(baseWidth, WEEK_TWO_DAY_WIDTH);
-  }
-
-  if (!isSubtaskExpandedVisible(subtask)) {
-    return baseWidth;
-  }
-
-  if (doc.value.view === "week" && subtask.duration <= 2) {
-    return Math.max(baseWidth, WEEK_TWO_DAY_WIDTH);
-  }
-
-  if (doc.value.view === "month" && subtask.duration <= 3) {
-    return Math.max(baseWidth, WEEK_TWO_DAY_WIDTH);
-  }
-
-  return baseWidth;
+  return baseSubtaskWidth(subtask);
 }
 
 function renderedSubtaskHeight(subtask: GanttSubtask, width: number) {
@@ -873,29 +844,13 @@ function wrappedLineCount(text: string, width: number) {
 }
 
 function isSubtaskExpandedVisible(subtask: GanttSubtask) {
-  return subtask.expanded && subtask.children.length > 0 && (doc.value.view === "day" || doc.value.view === "week" || doc.value.view === "month");
+  return subtask.expanded && subtask.children.length > 0 && doc.value.view === "day";
 }
 
 function segmentStyle(segment: UnitSegment) {
   return {
     width: `${Math.max(1, dateToX(segment.end) - dateToX(segment.start))}px`,
   };
-}
-
-function normalizeTask(task: GanttTask) {
-  task.progress = normalizeProgress(task.progress);
-}
-
-function syncTaskColor(task: GanttTask) {
-  if (!task.color || Object.values(statusColorMap()).includes(task.color)) {
-    task.color = statusColor(task.status);
-  }
-
-  task.subtasks.forEach((subtask) => {
-    if (!subtask.color || Object.values(statusColorMap()).includes(subtask.color)) {
-      subtask.color = task.color;
-    }
-  });
 }
 
 function toggleTaskLock(task: GanttTask) {
@@ -1014,16 +969,6 @@ function safeFileName(value: string): string {
   );
 }
 
-function statusColorMap() {
-  return {
-    todo: statusColor("todo"),
-    active: statusColor("active"),
-    done: statusColor("done"),
-    critical: statusColor("critical"),
-    milestone: statusColor("milestone"),
-  };
-}
-
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -1109,7 +1054,7 @@ function isEditableTarget(target: EventTarget | null) {
                 @click="selectTask(task)"
               >
                 <span class="index-cell">{{ index + 1 }}</span>
-                <input v-model="task.name" class="name-input main-name" aria-label="主任务名" @blur="normalizeTask(task)" />
+                <input v-model="task.name" class="name-input main-name" aria-label="主任务名" />
               </div>
             </div>
 
@@ -1217,21 +1162,6 @@ function isEditableTarget(target: EventTarget | null) {
                   {{ section.name }}
                 </option>
               </select>
-            </div>
-
-            <div class="inspector-field">
-              <label>状态</label>
-              <select v-model="selectedTask.status" @change="syncTaskColor(selectedTask)">
-                <option v-for="option in statusOptions" :key="option.value" :value="option.value">
-                  {{ option.label }}
-                </option>
-              </select>
-            </div>
-
-            <div class="inspector-field progress-field">
-              <label>进度</label>
-              <input v-model.number="selectedTask.progress" type="range" min="0" max="100" @input="normalizeTask(selectedTask)" />
-              <span>{{ selectedTask.progress }}%</span>
             </div>
 
             <div v-if="selectedSubtask" class="inspector-field color-field">
@@ -1816,11 +1746,6 @@ button.primary {
   color: #68727f;
   font-size: 13px;
   font-weight: 700;
-}
-
-.progress-field {
-  grid-template-columns: auto minmax(120px, 1fr) 48px;
-  min-width: 240px;
 }
 
 .color-field {
