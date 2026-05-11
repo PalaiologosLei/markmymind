@@ -426,6 +426,17 @@ function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubt
   };
 }
 
+function renameSubtask(task: GanttTask, subtask: GanttSubtask) {
+  const nextName = window.prompt("编辑子任务名", subtask.name);
+
+  if (!nextName) {
+    return;
+  }
+
+  subtask.name = nextName.trim() || subtask.name;
+  selectSubtask(task, subtask);
+}
+
 function closeContextMenu() {
   contextMenu.value = null;
 }
@@ -481,14 +492,13 @@ function contextSubtask() {
   return task.subtasks.find((subtask) => subtask.id === contextMenu.value?.subtaskId) ?? null;
 }
 
-function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask, index: number) {
+function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
   const left = dateToX(subtask.start);
   const width = Math.max(dayWidth.value * normalizeDuration(subtask.duration), 34);
-  const offset = Math.min(index * 3, 18);
 
   return {
     left: `${left}px`,
-    top: `${20 + offset}px`,
+    top: "21px",
     width: `${width}px`,
     background: subtask.color || task.color || statusColor(task.status),
   };
@@ -508,14 +518,6 @@ function segmentStyle(segment: UnitSegment) {
 
 function normalizeTask(task: GanttTask) {
   task.progress = normalizeProgress(task.progress);
-}
-
-function normalizeSubtask(subtask: GanttSubtask) {
-  subtask.duration = normalizeDuration(subtask.duration);
-
-  if (!subtask.start || !/^\d{4}-\d{2}-\d{2}$/.test(subtask.start)) {
-    subtask.start = todayIso();
-  }
 }
 
 function syncTaskColor(task: GanttTask) {
@@ -717,12 +719,10 @@ function statusColorMap() {
         </div>
 
         <div class="gantt-board">
-          <aside class="task-table">
+          <aside class="task-table" @contextmenu.prevent="closeContextMenu">
             <div class="task-header">
               <span class="index-cell"></span>
-              <span>主任务 / 子任务</span>
-              <span>开始</span>
-              <span>天数</span>
+              <span>任务名</span>
             </div>
 
             <div class="task-rows">
@@ -733,53 +733,9 @@ function statusColorMap() {
                 :class="{ selected: task.id === selectedTaskId }"
                 :style="rowStyle()"
                 @click="selectTask(task)"
-                @contextmenu="openContextMenu($event, task)"
               >
                 <span class="index-cell">{{ index + 1 }}</span>
-                <div class="task-name-stack">
-                  <input v-model="task.name" class="name-input main-name" aria-label="主任务名" @blur="normalizeTask(task)" />
-                  <div class="inline-subtask-strip">
-                    <input
-                      v-for="subtask in task.subtasks"
-                      :key="subtask.id"
-                      v-model="subtask.name"
-                      class="name-input subtask-name-input"
-                      :class="{ active: subtask.id === selectedSubtaskId }"
-                      aria-label="子任务名"
-                      @click.stop="selectSubtask(task, subtask)"
-                      @contextmenu.stop="openContextMenu($event, task, subtask)"
-                    />
-                  </div>
-                </div>
-                <div class="inline-subtask-strip field-strip">
-                  <input
-                    v-for="subtask in task.subtasks"
-                    :key="`${subtask.id}-start`"
-                    v-model="subtask.start"
-                    class="date-input"
-                    :class="{ active: subtask.id === selectedSubtaskId }"
-                    type="date"
-                    aria-label="子任务开始日期"
-                    @click.stop="selectSubtask(task, subtask)"
-                    @blur="normalizeSubtask(subtask)"
-                    @contextmenu.stop="openContextMenu($event, task, subtask)"
-                  />
-                </div>
-                <div class="inline-subtask-strip field-strip">
-                  <input
-                    v-for="subtask in task.subtasks"
-                    :key="`${subtask.id}-duration`"
-                    v-model.number="subtask.duration"
-                    class="duration-input"
-                    :class="{ active: subtask.id === selectedSubtaskId }"
-                    type="number"
-                    min="1"
-                    aria-label="子任务工期"
-                    @click.stop="selectSubtask(task, subtask)"
-                    @blur="normalizeSubtask(subtask)"
-                    @contextmenu.stop="openContextMenu($event, task, subtask)"
-                  />
-                </div>
+                <input v-model="task.name" class="name-input main-name" aria-label="主任务名" @blur="normalizeTask(task)" />
               </div>
             </div>
 
@@ -827,14 +783,15 @@ function statusColorMap() {
                   ></div>
 
                   <button
-                    v-for="(subtask, subtaskIndex) in task.subtasks"
+                    v-for="subtask in task.subtasks"
                     :key="subtask.id"
                     type="button"
                     class="subtask-bar"
                     :class="{ locked: task.locked, selected: subtask.id === selectedSubtaskId }"
-                    :style="subtaskBarStyle(task, subtask, subtaskIndex)"
+                    :style="subtaskBarStyle(task, subtask)"
                     :title="`${task.name} / ${subtask.name}: ${subtask.start} - ${endDate(subtask)}`"
                     @click.stop="selectSubtask(task, subtask)"
+                    @dblclick.stop="renameSubtask(task, subtask)"
                     @contextmenu.stop="openContextMenu($event, task, subtask)"
                     @pointerdown="beginSubtaskDrag($event, task, subtask, 'move')"
                   >
@@ -1122,7 +1079,7 @@ button.primary {
 
 .gantt-board {
   display: grid;
-  grid-template-columns: 600px minmax(0, 1fr);
+  grid-template-columns: 320px minmax(0, 1fr);
   min-height: 0;
   flex: 1;
   border-bottom: 1px solid #dbe1ea;
@@ -1138,7 +1095,7 @@ button.primary {
 .task-header,
 .task-row {
   display: grid;
-  grid-template-columns: 48px minmax(160px, 1fr) 170px 88px;
+  grid-template-columns: 48px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
 }
@@ -1170,26 +1127,6 @@ button.primary {
   text-align: right;
 }
 
-.task-name-stack {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.inline-subtask-strip {
-  display: flex;
-  min-width: 0;
-  gap: 6px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding-bottom: 2px;
-}
-
-.field-strip {
-  align-items: center;
-}
-
 .name-input,
 .date-input,
 .duration-input,
@@ -1207,13 +1144,6 @@ button.primary {
 
 .main-name {
   font-weight: 700;
-}
-
-.subtask-name-input {
-  flex: 0 0 92px;
-  padding: 0 8px;
-  color: #4d5967;
-  background: #f6f8fb;
 }
 
 .date-input {
@@ -1523,12 +1453,12 @@ button.primary {
   }
 
   .gantt-board {
-    grid-template-columns: 540px minmax(0, 1fr);
+    grid-template-columns: 300px minmax(0, 1fr);
   }
 
   .task-header,
   .task-row {
-    grid-template-columns: 40px minmax(140px, 1fr) 150px 76px;
+    grid-template-columns: 40px minmax(0, 1fr);
   }
 }
 </style>
