@@ -1,5 +1,5 @@
 gantt
-    %% markmymind:gantt {"schema":"markmymind.gantt/v2","version":2,"view":"month"}
+    %% markmymind:gantt {"schema":"markmymind.gantt/v3","version":3,"view":"month"}
     title 项目甘特图
     dateFormat YYYY-MM-DD
     axisFormat %m/%d
@@ -8,10 +8,10 @@ gantt
     毕业论文 :task, task-1
     %% markmymind:task {"id":"task-1","sectionId":"section-main","status":"active","progress":35,"locked":false,"color":"#2f6fed"}
     写初稿 :subtask, task-1, subtask-1, 2026-05-09, 4d
-    %% markmymind:subtask {"id":"subtask-1","taskId":"task-1","color":"#2f6fed"}
+    %% markmymind:subtask {"id":"subtask-1","taskId":"task-1","color":"#2f6fed","expanded":true,"children":[{"id":"child-1","name":"整理资料"},{"id":"child-2","name":"补充图表"}]}
     写综述 :subtask, task-1, subtask-2, 2026-05-13, 5d
-    %% markmymind:subtask {"id":"subtask-2","taskId":"task-1","color":"#3867d6"}
+    %% markmymind:subtask {"id":"subtask-2","taskId":"task-1","color":"#3867d6","expanded":false,"children":[]}
     任务 2 :task, task-2
     %% markmymind:task {"id":"task-2","sectionId":"section-main","status":"todo","progress":0,"locked":false,"color":"#3867d6"}
     调研 :subtask, task-2, subtask-3, 2026-05-11, 4d
-    %% markmymind:subtask {"id":"subtask-3","taskId":"task-2","color":"#3867d6"}
+    %% markmymind:subtask {"id":"subtask-3","taskId":"task-2","color":"#3867d6","expanded":false,"children":[]}

@@ -7,6 +7,13 @@ export interface GanttSubtask {
   start: string;
   duration: number;
   color: string;
+  expanded: boolean;
+  children: GanttSecondLevelSubtask[];
+}
+
+export interface GanttSecondLevelSubtask {
+  id: string;
+  name: string;
 }
 
 export interface GanttTask {
@@ -42,7 +49,7 @@ export interface GanttParseResult {
   warnings: string[];
 }
 
-export const MARKMYMIND_SCHEMA = "markmymind.gantt/v2";
+export const MARKMYMIND_SCHEMA = "markmymind.gantt/v3";
 export const DAY_MS = 86_400_000;
 export const RANGE_YEARS_BEFORE = 5;
 export const RANGE_YEARS_AFTER = 5;
@@ -317,9 +324,12 @@ export function parseGanttSource(source: string): GanttParseResult {
 
     nextTask.subtasks = ensureTaskSubtasks(nextTask).map((subtask) => {
       const subtaskMeta = subtaskMetadata.get(subtask.id);
+      const children = readSecondLevelSubtasks(subtaskMeta?.children);
 
       return {
         ...subtask,
+        children,
+        expanded: children.length > 0 && subtaskMeta?.expanded === true,
         color:
           typeof subtaskMeta?.color === "string" && subtaskMeta.color
             ? subtaskMeta.color
@@ -336,7 +346,7 @@ export function parseGanttSource(source: string): GanttParseResult {
 export function serializeGanttDocument(doc: GanttDocument): string {
   const lines = [
     "gantt",
-    `    %% markmymind:gantt ${JSON.stringify({ schema: MARKMYMIND_SCHEMA, version: 2, view: doc.view })}`,
+    `    %% markmymind:gantt ${JSON.stringify({ schema: MARKMYMIND_SCHEMA, version: 3, view: doc.view })}`,
     ...doc.directives.map((line) => `    ${line.trim()}`),
     `    title ${sanitizeLine(doc.title || "未命名甘特图")}`,
     `    dateFormat ${doc.dateFormat || "YYYY-MM-DD"}`,
@@ -376,6 +386,8 @@ export function serializeGanttDocument(doc: GanttDocument): string {
               id: subtask.id,
               taskId: task.id,
               color: subtask.color || task.color || DEFAULT_COLORS[task.status],
+              expanded: subtask.children.length > 0 && subtask.expanded,
+              children: subtask.children,
             })}`,
           );
         });
@@ -422,6 +434,8 @@ export function createSubtask(
     start,
     duration: 3,
     color,
+    expanded: false,
+    children: [],
   };
 }
 
@@ -524,6 +538,8 @@ function parseTaskLine(line: string, sectionId: string, fallbackIndex: number): 
             start: start || todayIso(),
             duration,
             color,
+            expanded: false,
+            children: [],
           },
         ],
   };
@@ -564,6 +580,8 @@ function parseSubtaskLine(
       start,
       duration,
       color: DEFAULT_COLORS.todo,
+      expanded: false,
+      children: [],
     },
   };
 }
@@ -629,6 +647,36 @@ function readJsonComment(line: string, prefix: string): Record<string, unknown> 
   } catch {
     return null;
   }
+}
+
+function readSecondLevelSubtasks(value: unknown): GanttSecondLevelSubtask[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item, index) => {
+      if (typeof item === "string") {
+        return { id: `child-${index + 1}`, name: sanitizeLine(item) };
+      }
+
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+
+      const record = item as Record<string, unknown>;
+      const name = typeof record.name === "string" ? sanitizeLine(record.name) : "";
+
+      if (!name) {
+        return null;
+      }
+
+      return {
+        id: typeof record.id === "string" && record.id ? record.id : `child-${index + 1}`,
+        name,
+      };
+    })
+    .filter((item): item is GanttSecondLevelSubtask => Boolean(item));
 }
 
 function splitTokens(value: string): string[] {

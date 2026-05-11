@@ -6,7 +6,7 @@ MarkMyMind 的文件以 Mermaid Gantt 源码为唯一真源。数据文件不使
 
 ```mermaid
 gantt
-    %% markmymind:gantt {"schema":"markmymind.gantt/v2","version":2,"view":"month"}
+    %% markmymind:gantt {"schema":"markmymind.gantt/v3","version":3,"view":"month"}
     title 项目甘特图
     dateFormat YYYY-MM-DD
     axisFormat %m/%d
@@ -15,7 +15,7 @@ gantt
     毕业论文 :task, task-1
     %% markmymind:task {"id":"task-1","sectionId":"section-main","status":"active","progress":35,"locked":false,"color":"#2f6fed"}
     写初稿 :subtask, task-1, subtask-1, 2026-05-09, 4d
-    %% markmymind:subtask {"id":"subtask-1","taskId":"task-1","color":"#2f6fed"}
+    %% markmymind:subtask {"id":"subtask-1","taskId":"task-1","color":"#2f6fed","expanded":true,"children":[{"id":"child-1","name":"整理资料"},{"id":"child-2","name":"补充图表"}]}
     写综述 :subtask, task-1, subtask-2, 2026-05-12, 3d
     %% markmymind:subtask {"id":"subtask-2","taskId":"task-1","color":"#3867d6"}
 ```
@@ -26,6 +26,7 @@ gantt
 - 标题、日期格式、坐标格式使用 Mermaid 原生命令。
 - 主任务写作 `主任务名 :task, task-id`。
 - 子任务线写作 `子任务名 :subtask, task-id, subtask-id, YYYY-MM-DD, Nd`。
+- 二级子任务保存在对应子任务的 `%% markmymind:subtask` 元数据中，`expanded` 记录展开状态，`children` 记录二级子任务名数组。
 - `view` 支持 `day`、`week`、`month`、`quarter`、`year`。
 - MarkMyMind 元数据使用 `%% markmymind:* {json}` 注释行。
 - 旧的 Mermaid 原生任务行仍会被兼容读取，并自动转换为“主任务 + 一个同名子任务”。

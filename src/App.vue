@@ -73,6 +73,9 @@ interface UnitSegment {
 }
 
 const TASK_ROW_HEIGHT = 72;
+const EXPANDED_LINE_HEIGHT = 22;
+const EXPANDED_VERTICAL_PADDING = 18;
+const WEEK_TWO_DAY_WIDTH = 192;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
 
 const doc = ref<GanttDocument>(createSampleDocument());
@@ -89,8 +92,8 @@ const panState = ref<PanState | null>(null);
 const contextMenu = ref<ContextMenuState | null>(null);
 const timelinePane = ref<HTMLElement | null>(null);
 const editingSubtaskId = ref<string | null>(null);
-const editingSubtaskName = ref("");
-const subtaskNameEditor = ref<HTMLInputElement | null>(null);
+const editingSubtaskText = ref("");
+const subtaskTextEditor = ref<HTMLTextAreaElement | null>(null);
 const copiedSubtask = ref<GanttSubtask | null>(null);
 
 const scaleOptions: Array<{ value: GanttScale; label: string }> = [
@@ -320,8 +323,7 @@ function addTask() {
     doc.value.sections.push(section);
   }
 
-  const start = selectedSubtask.value ? endDate(selectedSubtask.value) : todayIso();
-  const task = createTask(section.id, doc.value.tasks.length + 1, start);
+  const task = createTask(section.id, doc.value.tasks.length + 1, todayIso());
   doc.value.tasks.push(task);
   selectTask(task);
   statusMessage.value = "已添加任务";
@@ -357,7 +359,7 @@ function selectSubtask(task: GanttTask, subtask: GanttSubtask) {
 function handleGlobalKeydown(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
-    finishSubtaskNameEdit();
+    finishSubtaskTextEdit();
     void saveDocument();
     return;
   }
@@ -391,7 +393,10 @@ function copySelectedSubtask() {
     return;
   }
 
-  copiedSubtask.value = { ...subtask };
+  copiedSubtask.value = {
+    ...subtask,
+    children: subtask.children.map((child) => ({ ...child })),
+  };
   statusMessage.value = `已复制子任务 ${subtask.name}`;
 }
 
@@ -411,6 +416,11 @@ function pasteCopiedSubtask() {
     source.color || targetTask.color,
   );
   subtask.duration = normalizeDuration(source.duration);
+  subtask.expanded = source.children.length > 0 && source.expanded;
+  subtask.children = source.children.map((child, index) => ({
+    id: createSecondLevelId(subtask.id, index),
+    name: child.name,
+  }));
   targetTask.subtasks.push(subtask);
   selectSubtask(targetTask, subtask);
   statusMessage.value = `已粘贴子任务 ${subtask.name}`;
@@ -550,10 +560,23 @@ function taskFromTimelinePoint(clientX: number, clientY: number) {
     return null;
   }
 
-  const yInBody = clientY - rect.top + pane.scrollTop - 76;
-  const index = Math.floor(yInBody / TASK_ROW_HEIGHT);
+  let yInBody = clientY - rect.top + pane.scrollTop - 76;
 
-  return index >= 0 ? doc.value.tasks[index] ?? null : null;
+  if (yInBody < 0) {
+    return null;
+  }
+
+  for (const task of doc.value.tasks) {
+    const height = taskRowHeight(task);
+
+    if (yInBody < height) {
+      return task;
+    }
+
+    yInBody -= height;
+  }
+
+  return null;
 }
 
 function beginTimelinePan(event: PointerEvent) {
@@ -598,7 +621,7 @@ function endTimelinePan() {
 
 function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubtask) {
   event.preventDefault();
-  finishSubtaskNameEdit();
+  finishSubtaskTextEdit();
   selectTask(task, subtask);
   contextMenu.value = {
     x: event.clientX,
@@ -609,17 +632,20 @@ function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubt
   };
 }
 
-function startSubtaskNameEdit(task: GanttTask, subtask: GanttSubtask) {
+function startSubtaskTextEdit(task: GanttTask, subtask: GanttSubtask) {
   selectSubtask(task, subtask);
+  if (subtask.children.length > 0) {
+    subtask.expanded = true;
+  }
   editingSubtaskId.value = subtask.id;
-  editingSubtaskName.value = subtask.name;
+  editingSubtaskText.value = [subtask.name, ...subtask.children.map((child) => child.name)].join("\n");
   nextTick(() => {
-    subtaskNameEditor.value?.focus();
-    subtaskNameEditor.value?.select();
+    subtaskTextEditor.value?.focus();
+    subtaskTextEditor.value?.select();
   });
 }
 
-function finishSubtaskNameEdit() {
+function finishSubtaskTextEdit() {
   if (!editingSubtaskId.value) {
     return;
   }
@@ -627,17 +653,36 @@ function finishSubtaskNameEdit() {
   const subtask = findSubtaskById(editingSubtaskId.value);
 
   if (subtask) {
-    const nextName = editingSubtaskName.value.trim();
-    subtask.name = nextName || subtask.name;
+    applySubtaskLocalText(subtask, editingSubtaskText.value);
   }
 
   editingSubtaskId.value = null;
-  editingSubtaskName.value = "";
+  editingSubtaskText.value = "";
 }
 
-function cancelSubtaskNameEdit() {
+function cancelSubtaskTextEdit() {
   editingSubtaskId.value = null;
-  editingSubtaskName.value = "";
+  editingSubtaskText.value = "";
+}
+
+function applySubtaskLocalText(subtask: GanttSubtask, text: string) {
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim());
+  const nextName = lines[0] || subtask.name;
+  const childNames = lines.slice(1).filter(Boolean);
+
+  subtask.name = nextName;
+  subtask.children = childNames.map((name, index) => ({
+    id: subtask.children[index]?.id ?? createSecondLevelId(subtask.id, index),
+    name,
+  }));
+  subtask.expanded = subtask.children.length > 0;
+}
+
+function createSecondLevelId(subtaskId: string, index: number) {
+  return `${subtaskId}-child-${Date.now().toString(36)}-${index + 1}`;
 }
 
 function findSubtaskById(id: string) {
@@ -650,6 +695,17 @@ function findSubtaskById(id: string) {
   }
 
   return null;
+}
+
+function toggleSubtaskExpanded(task: GanttTask, subtask: GanttSubtask) {
+  selectSubtask(task, subtask);
+
+  if (!subtask.children.length) {
+    subtask.expanded = false;
+    return;
+  }
+
+  subtask.expanded = !subtask.expanded;
 }
 
 function closeContextMenu() {
@@ -708,21 +764,116 @@ function contextSubtask() {
 }
 
 function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
-  const left = dateToX(subtask.start);
-  const width = Math.max(dayWidth.value * normalizeDuration(subtask.duration), 34);
+  const layout = subtaskLayout(task, subtask);
 
   return {
-    left: `${left}px`,
-    top: "21px",
-    width: `${width}px`,
+    left: `${layout.left}px`,
+    top: "12px",
+    width: `${layout.width}px`,
+    height: `${layout.height}px`,
     background: subtask.color || task.color || statusColor(task.status),
   };
 }
 
-function rowStyle() {
+function rowStyle(task: GanttTask) {
   return {
-    height: `${TASK_ROW_HEIGHT}px`,
+    height: `${taskRowHeight(task)}px`,
   };
+}
+
+function taskRowHeight(task: GanttTask) {
+  return Math.max(
+    TASK_ROW_HEIGHT,
+    ...task.subtasks.map((subtask) => {
+      const layout = subtaskLayout(task, subtask);
+      return layout.height + 24;
+    }),
+  );
+}
+
+function subtaskLayout(task: GanttTask, target: GanttSubtask) {
+  const layouts = subtaskLayouts(task);
+  return layouts.get(target.id) ?? {
+    left: dateToX(target.start),
+    width: baseSubtaskWidth(target),
+    height: 30,
+  };
+}
+
+function subtaskLayouts(task: GanttTask) {
+  const layouts = new Map<string, { left: number; width: number; height: number }>();
+  const ordered = [...task.subtasks].sort((first, second) => {
+    const dateOrder = first.start.localeCompare(second.start);
+    return dateOrder || task.subtasks.indexOf(first) - task.subtasks.indexOf(second);
+  });
+  let cursor = Number.NEGATIVE_INFINITY;
+
+  ordered.forEach((subtask) => {
+    const width = renderedSubtaskWidth(subtask);
+    const naturalLeft = dateToX(subtask.start);
+    const left = Math.max(naturalLeft, cursor + 6);
+    layouts.set(subtask.id, {
+      left,
+      width,
+      height: renderedSubtaskHeight(subtask, width),
+    });
+    cursor = left + width;
+  });
+
+  return layouts;
+}
+
+function baseSubtaskWidth(subtask: GanttSubtask) {
+  return Math.max(dayWidth.value * normalizeDuration(subtask.duration), 34);
+}
+
+function renderedSubtaskWidth(subtask: GanttSubtask) {
+  const baseWidth = baseSubtaskWidth(subtask);
+
+  if (editingSubtaskId.value === subtask.id) {
+    return Math.max(baseWidth, WEEK_TWO_DAY_WIDTH);
+  }
+
+  if (!isSubtaskExpandedVisible(subtask)) {
+    return baseWidth;
+  }
+
+  if (doc.value.view === "week" && subtask.duration <= 2) {
+    return Math.max(baseWidth, WEEK_TWO_DAY_WIDTH);
+  }
+
+  if (doc.value.view === "month" && subtask.duration <= 3) {
+    return Math.max(baseWidth, WEEK_TWO_DAY_WIDTH);
+  }
+
+  return baseWidth;
+}
+
+function renderedSubtaskHeight(subtask: GanttSubtask, width: number) {
+  if (editingSubtaskId.value === subtask.id) {
+    const lineCount = Math.max(3, editingSubtaskText.value.split(/\r?\n/).length);
+    return EXPANDED_VERTICAL_PADDING + lineCount * EXPANDED_LINE_HEIGHT;
+  }
+
+  if (!isSubtaskExpandedVisible(subtask)) {
+    return 30;
+  }
+
+  const lineCount = expandedSubtaskLines(subtask).reduce((total, line) => total + wrappedLineCount(line, width - 30), 0);
+  return Math.max(34, EXPANDED_VERTICAL_PADDING + lineCount * EXPANDED_LINE_HEIGHT);
+}
+
+function expandedSubtaskLines(subtask: GanttSubtask) {
+  return [subtask.name, ...subtask.children.map((child) => child.name)];
+}
+
+function wrappedLineCount(text: string, width: number) {
+  const charactersPerLine = Math.max(3, Math.floor(width / 12));
+  return Math.max(1, Math.ceil(Array.from(text || " ").length / charactersPerLine));
+}
+
+function isSubtaskExpandedVisible(subtask: GanttSubtask) {
+  return subtask.expanded && subtask.children.length > 0 && (doc.value.view === "day" || doc.value.view === "week" || doc.value.view === "month");
 }
 
 function segmentStyle(segment: UnitSegment) {
@@ -954,7 +1105,7 @@ function isEditableTarget(target: EventTarget | null) {
                 :key="task.id"
                 class="task-row"
                 :class="{ selected: task.id === selectedTaskId }"
-                :style="rowStyle()"
+                :style="rowStyle(task)"
                 @click="selectTask(task)"
               >
                 <span class="index-cell">{{ index + 1 }}</span>
@@ -993,7 +1144,7 @@ function isEditableTarget(target: EventTarget | null) {
                   :key="task.id"
                   class="timeline-row"
                   :class="{ selected: task.id === selectedTaskId }"
-                  :style="rowStyle()"
+                  :style="rowStyle(task)"
                   @click="selectTask(task)"
                   @contextmenu="openContextMenu($event, task)"
                 >
@@ -1011,29 +1162,44 @@ function isEditableTarget(target: EventTarget | null) {
                     role="button"
                     tabindex="0"
                     class="subtask-bar"
-                    :class="{ locked: task.locked, selected: subtask.id === selectedSubtaskId }"
+                    :class="{ locked: task.locked, selected: subtask.id === selectedSubtaskId, expanded: isSubtaskExpandedVisible(subtask) }"
                     :style="subtaskBarStyle(task, subtask)"
                     :title="`${task.name} / ${subtask.name}: ${subtask.start} - ${endDate(subtask)}`"
                     @click.stop="selectSubtask(task, subtask)"
-                    @dblclick.stop="startSubtaskNameEdit(task, subtask)"
+                    @dblclick.stop="startSubtaskTextEdit(task, subtask)"
                     @contextmenu.stop="openContextMenu($event, task, subtask)"
                     @pointerdown="beginSubtaskDrag($event, task, subtask, 'move')"
                   >
-                    <input
+                    <button
+                      type="button"
+                      class="fold-button"
+                      :class="{ disabled: !subtask.children.length }"
+                      :title="subtask.expanded ? '折叠' : '展开'"
+                      @click.stop="toggleSubtaskExpanded(task, subtask)"
+                      @pointerdown.stop
+                    >
+                      {{ subtask.expanded && subtask.children.length ? "v" : ">" }}
+                    </button>
+                    <textarea
                       v-if="editingSubtaskId === subtask.id"
-                      ref="subtaskNameEditor"
-                      v-model="editingSubtaskName"
-                      class="subtask-name-editor"
-                      aria-label="子任务名"
-                      @blur="finishSubtaskNameEdit"
+                      ref="subtaskTextEditor"
+                      v-model="editingSubtaskText"
+                      class="subtask-text-editor"
+                      aria-label="子任务局部编辑"
+                      @blur="finishSubtaskTextEdit"
                       @click.stop
                       @dblclick.stop
-                      @keydown.enter.stop.prevent="finishSubtaskNameEdit"
-                      @keydown.esc.stop.prevent="cancelSubtaskNameEdit"
+                      @keydown.ctrl.enter.stop.prevent="finishSubtaskTextEdit"
+                      @keydown.meta.enter.stop.prevent="finishSubtaskTextEdit"
+                      @keydown.esc.stop.prevent="cancelSubtaskTextEdit"
                       @pointerdown.stop
-                    />
-                    <span v-else>{{ subtask.name }}</span>
-                    <span v-if="subtask.duration >= 3">{{ subtask.duration }} 天</span>
+                    ></textarea>
+                    <span v-else-if="isSubtaskExpandedVisible(subtask)" class="expanded-subtask-lines">
+                      <span class="primary-line">{{ subtask.name }}</span>
+                      <span v-for="child in subtask.children" :key="child.id" class="secondary-line">{{ child.name }}</span>
+                    </span>
+                    <span v-else class="primary-line">{{ subtask.name }}</span>
+                    <span v-if="!isSubtaskExpandedVisible(subtask) && subtask.duration >= 3" class="duration-label">{{ subtask.duration }} 天</span>
                     <i class="resize-handle" title="调整工期" @pointerdown.stop="beginSubtaskDrag($event, task, subtask, 'resize')"></i>
                   </div>
                 </div>
@@ -1535,6 +1701,12 @@ button.primary {
   outline-offset: 1px;
 }
 
+.subtask-bar.expanded {
+  align-items: flex-start;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
 .subtask-bar.locked {
   cursor: default;
   opacity: 0.72;
@@ -1547,17 +1719,65 @@ button.primary {
   white-space: nowrap;
 }
 
-.subtask-name-editor {
+.fold-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.fold-button.disabled {
+  opacity: 0.35;
+}
+
+.expanded-subtask-lines {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  overflow: visible !important;
+  white-space: normal !important;
+}
+
+.primary-line,
+.secondary-line {
+  line-height: 18px;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+}
+
+.secondary-line {
+  opacity: 0.88;
+  font-weight: 600;
+}
+
+.duration-label {
+  flex: 0 0 auto;
+}
+
+.subtask-text-editor {
   min-width: 0;
   width: 100%;
-  height: 24px;
+  min-height: 58px;
   border: 0;
   border-radius: 5px;
   outline: 0;
-  padding: 0 6px;
+  padding: 4px 6px;
+  resize: none;
   color: #1e2b3a;
   background: rgba(255, 255, 255, 0.92);
   font-weight: 700;
+  line-height: 18px;
 }
 
 .resize-handle {
