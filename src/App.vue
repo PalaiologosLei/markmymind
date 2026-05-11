@@ -4,9 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   CalendarDays,
+  ChevronDown,
+  ChevronRight,
   Code2,
   FilePlus2,
+  Folder,
   FolderOpen,
+  GripVertical,
   Lock,
   LocateFixed,
   Plus,
@@ -17,6 +21,7 @@ import {
 import {
   addDays,
   addMonths,
+  createSection,
   createSampleDocument,
   createSubtask,
   createTask,
@@ -30,6 +35,7 @@ import {
   taskStart,
   todayIso,
   type GanttDocument,
+  type GanttSection,
   type GanttScale,
   type GanttSubtask,
   type GanttTask,
@@ -61,6 +67,42 @@ interface ContextMenuState {
   date?: string;
 }
 
+interface TaskListMenuState {
+  x: number;
+  y: number;
+  target: "blank" | "task" | "section";
+  taskId?: string;
+  sectionId?: string;
+}
+
+type TaskListRow =
+  | {
+      type: "section";
+      key: string;
+      section: GanttSection;
+    }
+  | {
+      type: "task";
+      key: string;
+      task: GanttTask;
+      section: GanttSection | null;
+      depth: 0 | 1;
+    };
+
+interface TaskListDragState {
+  type: "task" | "section";
+  id: string;
+  rowKey: string;
+}
+
+interface TaskListDropTarget {
+  kind: "top" | "section";
+  index: number;
+  indicator: "before" | "after" | "inside" | "end";
+  rowKey?: string;
+  sectionId?: string;
+}
+
 interface UnitSegment {
   key: string;
   label: string;
@@ -70,6 +112,7 @@ interface UnitSegment {
 }
 
 const TASK_ROW_HEIGHT = 72;
+const SECTION_ROW_HEIGHT = 44;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
@@ -87,11 +130,16 @@ const sourceDraft = ref("");
 const dragState = ref<DragState | null>(null);
 const panState = ref<PanState | null>(null);
 const contextMenu = ref<ContextMenuState | null>(null);
+const taskListMenu = ref<TaskListMenuState | null>(null);
+const taskListDrag = ref<TaskListDragState | null>(null);
+const taskListDropTarget = ref<TaskListDropTarget | null>(null);
+const taskTablePane = ref<HTMLElement | null>(null);
 const timelinePane = ref<HTMLElement | null>(null);
 const editingSubtaskId = ref<string | null>(null);
 const editingSubtaskText = ref("");
 const subtaskTextEditor = ref<HTMLTextAreaElement | null>(null);
 const copiedSubtask = ref<GanttSubtask | null>(null);
+let syncingVerticalScroll = false;
 
 const scaleOptions: Array<{ value: GanttScale; label: string }> = [
   { value: "day", label: "天" },
@@ -103,7 +151,64 @@ const scaleOptions: Array<{ value: GanttScale; label: string }> = [
 
 const sourceText = computed(() => serializeGanttDocument(doc.value));
 const isDirty = computed(() => sourceText.value !== lastSavedSource.value);
-const orderedTasks = computed(() => doc.value.tasks);
+const sectionById = computed(() => new Map(doc.value.sections.map((section) => [section.id, section])));
+const taskListRows = computed<TaskListRow[]>(() => {
+  const rows: TaskListRow[] = [];
+  const consumedSections = new Set<string>();
+  const consumedRootTasks = new Set<string>();
+
+  doc.value.outline.forEach((item) => {
+    if (item.type === "section") {
+      const section = sectionById.value.get(item.id);
+
+      if (!section || consumedSections.has(section.id)) {
+        return;
+      }
+
+      rows.push({ type: "section", key: `section-${section.id}`, section });
+      consumedSections.add(section.id);
+
+      if (!section.collapsed) {
+        tasksInSection(section.id).forEach((task) => {
+          rows.push({ type: "task", key: `task-${task.id}`, task, section, depth: 1 });
+        });
+      }
+
+      return;
+    }
+
+    const task = doc.value.tasks.find((itemTask) => itemTask.id === item.id);
+
+    if (task && !task.sectionId && !consumedRootTasks.has(task.id)) {
+      rows.push({ type: "task", key: `task-${task.id}`, task, section: null, depth: 0 });
+      consumedRootTasks.add(task.id);
+    }
+  });
+
+  doc.value.sections.forEach((section) => {
+    if (consumedSections.has(section.id)) {
+      return;
+    }
+
+    rows.push({ type: "section", key: `section-${section.id}`, section });
+    consumedSections.add(section.id);
+
+    if (!section.collapsed) {
+      tasksInSection(section.id).forEach((task) => {
+        rows.push({ type: "task", key: `task-${task.id}`, task, section, depth: 1 });
+      });
+    }
+  });
+
+  doc.value.tasks.forEach((task) => {
+    if (!task.sectionId && !consumedRootTasks.has(task.id)) {
+      rows.push({ type: "task", key: `task-${task.id}`, task, section: null, depth: 0 });
+      consumedRootTasks.add(task.id);
+    }
+  });
+
+  return rows;
+});
 const selectedTask = computed(() => doc.value.tasks.find((task) => task.id === selectedTaskId.value) ?? null);
 const selectedSubtask = computed(() => {
   const task = selectedTask.value;
@@ -305,15 +410,14 @@ async function saveDocumentAs() {
   await saveDocument();
 }
 
-function addTask() {
-  const section = doc.value.sections[0] ?? { id: "section-main", name: "默认分组" };
+function addTask(sectionId = "") {
+  const task = createTask(sectionId, doc.value.tasks.length + 1, todayIso());
+  insertTaskIntoSection(task, sectionId, tasksInSection(sectionId).length);
 
-  if (!doc.value.sections.length) {
-    doc.value.sections.push(section);
+  if (!sectionId) {
+    doc.value.outline.push({ type: "task", id: task.id });
   }
 
-  const task = createTask(section.id, doc.value.tasks.length + 1, todayIso());
-  doc.value.tasks.push(task);
   selectTask(task);
   statusMessage.value = "已添加任务";
 }
@@ -325,9 +429,54 @@ function deleteSelectedTask() {
     return;
   }
 
+  deleteTask(task);
+}
+
+function deleteTask(task: GanttTask) {
   doc.value.tasks = doc.value.tasks.filter((item) => item.id !== task.id);
-  selectTask(doc.value.tasks[0]);
+  doc.value.outline = doc.value.outline.filter((item) => !(item.type === "task" && item.id === task.id));
+
+  if (selectedTaskId.value === task.id) {
+    selectTask(firstVisibleTask());
+  }
+
   statusMessage.value = `已删除 ${task.name}`;
+}
+
+function firstVisibleTask() {
+  return taskListRows.value.find((row) => row.type === "task")?.task ?? doc.value.tasks[0];
+}
+
+function tasksInSection(sectionId: string) {
+  return doc.value.tasks.filter((task) => task.sectionId === sectionId);
+}
+
+function insertTaskIntoSection(task: GanttTask, sectionId: string, index: number) {
+  const existingIndex = doc.value.tasks.findIndex((item) => item.id === task.id);
+
+  if (existingIndex >= 0) {
+    doc.value.tasks.splice(existingIndex, 1);
+  }
+
+  task.sectionId = sectionId;
+
+  const siblings = tasksInSection(sectionId);
+  const clampedIndex = Math.max(0, Math.min(index, siblings.length));
+  const beforeTask = siblings[clampedIndex];
+
+  if (beforeTask) {
+    doc.value.tasks.splice(doc.value.tasks.indexOf(beforeTask), 0, task);
+    return;
+  }
+
+  const lastSibling = siblings[siblings.length - 1];
+
+  if (lastSibling) {
+    doc.value.tasks.splice(doc.value.tasks.indexOf(lastSibling) + 1, 0, task);
+    return;
+  }
+
+  doc.value.tasks.push(task);
 }
 
 function selectTask(task: GanttTask | undefined, subtask?: GanttSubtask) {
@@ -555,11 +704,11 @@ function taskFromTimelinePoint(clientX: number, clientY: number) {
     return null;
   }
 
-  for (const task of doc.value.tasks) {
-    const height = taskRowHeight(task);
+  for (const row of taskListRows.value) {
+    const height = taskListRowHeight(row);
 
     if (yInBody < height) {
-      return task;
+      return row.type === "task" ? row.task : null;
     }
 
     yInBody -= height;
@@ -608,9 +757,34 @@ function endTimelinePan() {
   window.removeEventListener("pointermove", updateTimelinePan);
 }
 
+function syncTaskTableScroll() {
+  if (syncingVerticalScroll || !taskTablePane.value || !timelinePane.value) {
+    return;
+  }
+
+  syncingVerticalScroll = true;
+  timelinePane.value.scrollTop = taskTablePane.value.scrollTop;
+  requestAnimationFrame(() => {
+    syncingVerticalScroll = false;
+  });
+}
+
+function syncTimelineScroll() {
+  if (syncingVerticalScroll || !taskTablePane.value || !timelinePane.value) {
+    return;
+  }
+
+  syncingVerticalScroll = true;
+  taskTablePane.value.scrollTop = timelinePane.value.scrollTop;
+  requestAnimationFrame(() => {
+    syncingVerticalScroll = false;
+  });
+}
+
 function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubtask) {
   event.preventDefault();
   finishSubtaskTextEdit();
+  taskListMenu.value = null;
   selectTask(task, subtask);
   contextMenu.value = {
     x: event.clientX,
@@ -732,6 +906,408 @@ function expansionScaleForSubtask(subtask: GanttSubtask): GanttScale {
 
 function closeContextMenu() {
   contextMenu.value = null;
+  taskListMenu.value = null;
+}
+
+function openTaskListBlankMenu(event: MouseEvent) {
+  const target = event.target as HTMLElement;
+
+  if (target.closest("[data-row-key], .context-menu")) {
+    return;
+  }
+
+  event.preventDefault();
+  finishSubtaskTextEdit();
+  contextMenu.value = null;
+  taskListMenu.value = {
+    x: event.clientX,
+    y: event.clientY,
+    target: "blank",
+  };
+}
+
+function openTaskListRowMenu(event: MouseEvent, row: TaskListRow) {
+  event.preventDefault();
+  finishSubtaskTextEdit();
+  contextMenu.value = null;
+
+  if (row.type === "task") {
+    selectTask(row.task);
+    taskListMenu.value = {
+      x: event.clientX,
+      y: event.clientY,
+      target: "task",
+      taskId: row.task.id,
+      sectionId: row.task.sectionId || undefined,
+    };
+    return;
+  }
+
+  taskListMenu.value = {
+    x: event.clientX,
+    y: event.clientY,
+    target: "section",
+    sectionId: row.section.id,
+  };
+}
+
+function addTaskFromListMenu() {
+  const menu = taskListMenu.value;
+
+  if (!menu || menu.target === "blank") {
+    addTask();
+    closeContextMenu();
+    return;
+  }
+
+  if (menu.target === "section" && menu.sectionId) {
+    addTask(menu.sectionId);
+    closeContextMenu();
+    return;
+  }
+
+  const anchorTask = menu.taskId ? doc.value.tasks.find((task) => task.id === menu.taskId) : null;
+
+  if (!anchorTask) {
+    addTask();
+    closeContextMenu();
+    return;
+  }
+
+  const task = createTask(anchorTask.sectionId, doc.value.tasks.length + 1, todayIso());
+  const siblingIndex = tasksInSection(anchorTask.sectionId).findIndex((item) => item.id === anchorTask.id);
+  insertTaskIntoSection(task, anchorTask.sectionId, siblingIndex + 1);
+
+  if (!anchorTask.sectionId) {
+    const outlineIndex = outlineIndexOfRootTask(anchorTask.id);
+    doc.value.outline.splice(outlineIndex >= 0 ? outlineIndex + 1 : doc.value.outline.length, 0, {
+      type: "task",
+      id: task.id,
+    });
+  }
+
+  selectTask(task);
+  statusMessage.value = "已添加任务";
+  closeContextMenu();
+}
+
+function addSectionFromListMenu() {
+  const section = createSection(doc.value.sections.length + 1);
+  const insertIndex = topInsertionIndexForMenu(taskListMenu.value);
+
+  doc.value.sections.push(section);
+  doc.value.outline.splice(insertIndex, 0, { type: "section", id: section.id });
+  statusMessage.value = `已新建分组 ${section.name}`;
+  closeContextMenu();
+}
+
+function deleteTaskFromListMenu() {
+  const task = taskListMenu.value?.taskId
+    ? doc.value.tasks.find((item) => item.id === taskListMenu.value?.taskId)
+    : null;
+
+  if (!task) {
+    closeContextMenu();
+    return;
+  }
+
+  if (!window.confirm(`确定删除任务“${task.name}”吗？`)) {
+    closeContextMenu();
+    return;
+  }
+
+  deleteTask(task);
+  closeContextMenu();
+}
+
+function dissolveSectionFromListMenu() {
+  const sectionId = taskListMenu.value?.sectionId;
+  const section = sectionId ? sectionById.value.get(sectionId) : null;
+
+  if (!section) {
+    closeContextMenu();
+    return;
+  }
+
+  const sectionTasks = tasksInSection(section.id);
+  const outlineIndex = outlineIndexOfSection(section.id);
+
+  sectionTasks.forEach((task) => {
+    task.sectionId = "";
+  });
+
+  doc.value.sections = doc.value.sections.filter((item) => item.id !== section.id);
+  doc.value.outline = doc.value.outline.filter((item) => !(item.type === "section" && item.id === section.id));
+
+  const insertIndex = outlineIndex >= 0 ? outlineIndex : doc.value.outline.length;
+  doc.value.outline.splice(
+    insertIndex,
+    0,
+    ...sectionTasks.map((task) => ({ type: "task" as const, id: task.id })),
+  );
+
+  statusMessage.value = `已解散分组 ${section.name}`;
+  closeContextMenu();
+}
+
+function toggleSectionCollapsed(section: GanttSection) {
+  section.collapsed = !section.collapsed;
+}
+
+function setSelectedTaskSection(event: Event) {
+  const task = selectedTask.value;
+  const target = event.target as HTMLSelectElement;
+
+  if (!task) {
+    return;
+  }
+
+  moveTaskToSection(task, target.value);
+}
+
+function moveTaskToSection(task: GanttTask, sectionId: string) {
+  if (task.sectionId === sectionId) {
+    return;
+  }
+
+  doc.value.outline = doc.value.outline.filter((item) => !(item.type === "task" && item.id === task.id));
+  insertTaskIntoSection(task, sectionId, tasksInSection(sectionId).length);
+
+  if (!sectionId) {
+    doc.value.outline.push({ type: "task", id: task.id });
+  }
+
+  selectTask(task);
+  statusMessage.value = sectionId ? "已移动任务到分组" : "已移动任务到根目录";
+}
+
+function topInsertionIndexForMenu(menu: TaskListMenuState | null) {
+  if (!menu || menu.target === "blank") {
+    return doc.value.outline.length;
+  }
+
+  if (menu.target === "section" && menu.sectionId) {
+    const index = outlineIndexOfSection(menu.sectionId);
+    return index >= 0 ? index + 1 : doc.value.outline.length;
+  }
+
+  const task = menu.taskId ? doc.value.tasks.find((item) => item.id === menu.taskId) : null;
+
+  if (!task) {
+    return doc.value.outline.length;
+  }
+
+  if (!task.sectionId) {
+    const index = outlineIndexOfRootTask(task.id);
+    return index >= 0 ? index + 1 : doc.value.outline.length;
+  }
+
+  const sectionIndex = outlineIndexOfSection(task.sectionId);
+  return sectionIndex >= 0 ? sectionIndex + 1 : doc.value.outline.length;
+}
+
+function beginTaskListDrag(event: PointerEvent, row: TaskListRow) {
+  if (event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  finishSubtaskTextEdit();
+  closeContextMenu();
+  taskListDrag.value = {
+    type: row.type,
+    id: row.type === "section" ? row.section.id : row.task.id,
+    rowKey: row.key,
+  };
+  taskListDropTarget.value = null;
+  window.addEventListener("pointermove", updateTaskListDrag);
+  window.addEventListener("pointerup", endTaskListDrag, { once: true });
+}
+
+function updateTaskListDrag(event: PointerEvent) {
+  if (!taskListDrag.value) {
+    return;
+  }
+
+  taskListDropTarget.value = resolveTaskListDropTarget(event);
+}
+
+function endTaskListDrag() {
+  if (taskListDrag.value && taskListDropTarget.value) {
+    applyTaskListDrop(taskListDrag.value, taskListDropTarget.value);
+  }
+
+  taskListDrag.value = null;
+  taskListDropTarget.value = null;
+  window.removeEventListener("pointermove", updateTaskListDrag);
+}
+
+function resolveTaskListDropTarget(event: PointerEvent): TaskListDropTarget | null {
+  const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+
+  if (!element?.closest(".task-table")) {
+    return null;
+  }
+
+  const rowElement = element.closest("[data-row-key]") as HTMLElement | null;
+
+  if (!rowElement) {
+    return {
+      kind: "top",
+      index: doc.value.outline.length,
+      indicator: "end",
+    };
+  }
+
+  const row = taskListRows.value.find((item) => item.key === rowElement.dataset.rowKey);
+  const drag = taskListDrag.value;
+
+  if (!row || !drag) {
+    return null;
+  }
+
+  const rect = rowElement.getBoundingClientRect();
+  const ratio = rect.height ? (event.clientY - rect.top) / rect.height : 0.5;
+
+  if (row.type === "section") {
+    const topIndex = outlineIndexOfSection(row.section.id);
+
+    if (drag.type === "task" && ratio >= 0.28 && ratio <= 0.72) {
+      return {
+        kind: "section",
+        sectionId: row.section.id,
+        index: tasksInSection(row.section.id).length,
+        indicator: "inside",
+        rowKey: row.key,
+      };
+    }
+
+    return {
+      kind: "top",
+      index: topIndex + (ratio >= 0.5 ? 1 : 0),
+      indicator: ratio >= 0.5 ? "after" : "before",
+      rowKey: row.key,
+    };
+  }
+
+  if (row.task.sectionId) {
+    if (drag.type === "section") {
+      const sectionRowKey = `section-${row.task.sectionId}`;
+      const sectionIndex = outlineIndexOfSection(row.task.sectionId);
+
+      return {
+        kind: "top",
+        index: sectionIndex + (ratio >= 0.5 ? 1 : 0),
+        indicator: ratio >= 0.5 ? "after" : "before",
+        rowKey: sectionRowKey,
+      };
+    }
+
+    const siblings = tasksInSection(row.task.sectionId);
+    const siblingIndex = siblings.findIndex((task) => task.id === row.task.id);
+
+    return {
+      kind: "section",
+      sectionId: row.task.sectionId,
+      index: siblingIndex + (ratio >= 0.5 ? 1 : 0),
+      indicator: ratio >= 0.5 ? "after" : "before",
+      rowKey: row.key,
+    };
+  }
+
+  const topIndex = outlineIndexOfRootTask(row.task.id);
+
+  return {
+    kind: "top",
+    index: topIndex + (ratio >= 0.5 ? 1 : 0),
+    indicator: ratio >= 0.5 ? "after" : "before",
+    rowKey: row.key,
+  };
+}
+
+function applyTaskListDrop(drag: TaskListDragState, target: TaskListDropTarget) {
+  if (drag.type === "section") {
+    applySectionDrop(drag.id, target);
+    return;
+  }
+
+  applyTaskDrop(drag.id, target);
+}
+
+function applySectionDrop(sectionId: string, target: TaskListDropTarget) {
+  if (target.kind !== "top") {
+    return;
+  }
+
+  const sourceIndex = outlineIndexOfSection(sectionId);
+
+  if (sourceIndex < 0) {
+    return;
+  }
+
+  let insertIndex = target.index;
+  doc.value.outline.splice(sourceIndex, 1);
+
+  if (sourceIndex < insertIndex) {
+    insertIndex -= 1;
+  }
+
+  insertIndex = Math.max(0, Math.min(insertIndex, doc.value.outline.length));
+  doc.value.outline.splice(insertIndex, 0, { type: "section", id: sectionId });
+}
+
+function applyTaskDrop(taskId: string, target: TaskListDropTarget) {
+  const task = doc.value.tasks.find((item) => item.id === taskId);
+
+  if (!task) {
+    return;
+  }
+
+  if (target.kind === "section" && target.sectionId) {
+    const sourceSectionId = task.sectionId;
+    const sourceIndex = tasksInSection(sourceSectionId).findIndex((item) => item.id === task.id);
+    let targetIndex = target.index;
+
+    if (sourceSectionId === target.sectionId && sourceIndex >= 0 && sourceIndex < targetIndex) {
+      targetIndex -= 1;
+    }
+
+    doc.value.outline = doc.value.outline.filter((item) => !(item.type === "task" && item.id === task.id));
+    insertTaskIntoSection(task, target.sectionId, targetIndex);
+    selectTask(task);
+    return;
+  }
+
+  let insertIndex = target.index;
+  const sourceRootIndex = outlineIndexOfRootTask(task.id);
+
+  doc.value.outline = doc.value.outline.filter((item) => !(item.type === "task" && item.id === task.id));
+
+  if (sourceRootIndex >= 0 && sourceRootIndex < insertIndex) {
+    insertIndex -= 1;
+  }
+
+  insertTaskIntoSection(task, "", tasksInSection("").length);
+  insertIndex = Math.max(0, Math.min(insertIndex, doc.value.outline.length));
+  doc.value.outline.splice(insertIndex, 0, { type: "task", id: task.id });
+  selectTask(task);
+}
+
+function outlineIndexOfSection(sectionId: string) {
+  return doc.value.outline.findIndex((item) => item.type === "section" && item.id === sectionId);
+}
+
+function outlineIndexOfRootTask(taskId: string) {
+  return doc.value.outline.findIndex((item) => item.type === "task" && item.id === taskId);
+}
+
+function isTaskListDrop(row: TaskListRow, indicator: TaskListDropTarget["indicator"]) {
+  return taskListDropTarget.value?.rowKey === row.key && taskListDropTarget.value.indicator === indicator;
+}
+
+function isTaskListDragging(row: TaskListRow) {
+  return taskListDrag.value?.rowKey === row.key;
 }
 
 function addSubtaskFromContext() {
@@ -797,10 +1373,18 @@ function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
   };
 }
 
-function rowStyle(task: GanttTask) {
+function taskListRowStyle(row: TaskListRow) {
   return {
-    height: `${taskRowHeight(task)}px`,
+    height: `${taskListRowHeight(row)}px`,
   };
+}
+
+function taskListRowHeight(row: TaskListRow) {
+  return row.type === "section" ? SECTION_ROW_HEIGHT : taskRowHeight(row.task);
+}
+
+function taskNumber(task: GanttTask) {
+  return doc.value.tasks.findIndex((item) => item.id === task.id) + 1;
 }
 
 function taskRowHeight(task: GanttTask) {
@@ -1095,27 +1679,65 @@ function isEditableTarget(target: EventTarget | null) {
         </div>
 
         <div class="gantt-board">
-          <aside class="task-table" @contextmenu.prevent="closeContextMenu">
+          <aside ref="taskTablePane" class="task-table" @scroll="syncTaskTableScroll" @contextmenu.prevent="openTaskListBlankMenu">
             <div class="task-header">
               <span class="index-cell"></span>
-              <span>任务名</span>
+              <span>任务 / 分组</span>
             </div>
 
-            <div class="task-rows">
+            <div class="task-rows" :class="{ 'drop-at-end': taskListDropTarget?.indicator === 'end' }">
               <div
-                v-for="(task, index) in orderedTasks"
-                :key="task.id"
+                v-for="row in taskListRows"
+                :key="row.key"
+                :data-row-key="row.key"
                 class="task-row"
-                :class="{ selected: task.id === selectedTaskId }"
-                :style="rowStyle(task)"
-                @click="selectTask(task)"
+                :class="{
+                  selected: row.type === 'task' && row.task.id === selectedTaskId,
+                  'section-row': row.type === 'section',
+                  'child-task-row': row.type === 'task' && row.depth === 1,
+                  collapsed: row.type === 'section' && row.section.collapsed,
+                  dragging: isTaskListDragging(row),
+                  'drop-before': isTaskListDrop(row, 'before'),
+                  'drop-after': isTaskListDrop(row, 'after'),
+                  'drop-inside': isTaskListDrop(row, 'inside'),
+                }"
+                :style="taskListRowStyle(row)"
+                @click="row.type === 'task' && selectTask(row.task)"
+                @contextmenu.stop.prevent="openTaskListRowMenu($event, row)"
               >
-                <span class="index-cell">{{ index + 1 }}</span>
-                <input v-model="task.name" class="name-input main-name" aria-label="主任务名" />
+                <template v-if="row.type === 'section'">
+                  <button
+                    type="button"
+                    class="drag-handle"
+                    title="拖动排序"
+                    @pointerdown="beginTaskListDrag($event, row)"
+                  >
+                    <GripVertical :size="15" />
+                  </button>
+                  <button type="button" class="section-toggle" title="折叠/展开" @click.stop="toggleSectionCollapsed(row.section)">
+                    <ChevronRight v-if="row.section.collapsed" :size="15" />
+                    <ChevronDown v-else :size="15" />
+                  </button>
+                  <Folder :size="16" class="section-icon" />
+                  <input v-model="row.section.name" class="name-input main-name section-name" aria-label="分组名" />
+                </template>
+
+                <template v-else>
+                  <button
+                    type="button"
+                    class="drag-handle"
+                    title="拖动排序"
+                    @pointerdown="beginTaskListDrag($event, row)"
+                  >
+                    <GripVertical :size="15" />
+                  </button>
+                  <span class="index-cell">{{ taskNumber(row.task) }}</span>
+                  <input v-model="row.task.name" class="name-input main-name" aria-label="主任务名" />
+                </template>
               </div>
             </div>
 
-            <button type="button" class="add-row" @click="addTask">
+            <button type="button" class="add-row" @click="() => addTask()">
               <Plus :size="17" />
               <span>添加任务</span>
             </button>
@@ -1125,6 +1747,7 @@ function isEditableTarget(target: EventTarget | null) {
             ref="timelinePane"
             class="timeline-pane"
             aria-label="甘特图时间轴"
+            @scroll="syncTimelineScroll"
             @pointerdown="beginTimelinePan"
           >
             <div class="timeline-content" :style="{ width: `${timelineWidth}px` }">
@@ -1142,42 +1765,49 @@ function isEditableTarget(target: EventTarget | null) {
 
               <div class="timeline-body">
                 <div
-                  v-for="task in orderedTasks"
-                  :key="task.id"
+                  v-for="row in taskListRows"
+                  :key="row.key"
                   class="timeline-row"
-                  :class="{ selected: task.id === selectedTaskId }"
-                  :style="rowStyle(task)"
-                  @click="selectTask(task)"
-                  @contextmenu="openContextMenu($event, task)"
+                  :class="{ selected: row.type === 'task' && row.task.id === selectedTaskId, 'section-timeline-row': row.type === 'section' }"
+                  :style="taskListRowStyle(row)"
+                  @click="row.type === 'task' && selectTask(row.task)"
+                  @contextmenu="row.type === 'task' && openContextMenu($event, row.task)"
                 >
                   <div class="today-line" :style="todayLineStyle"></div>
                   <div
                     v-for="segment in unitSegments"
-                    :key="`${task.id}-${segment.key}`"
+                    :key="`${row.key}-${segment.key}`"
                     class="grid-unit"
                     :style="segmentStyle(segment)"
                   ></div>
 
                   <div
-                    v-for="subtask in task.subtasks"
+                    v-if="row.type === 'section'"
+                    class="section-timeline-label"
+                  >
+                    {{ row.section.name }}
+                  </div>
+
+                  <div
+                    v-for="subtask in row.type === 'task' ? row.task.subtasks : []"
                     :key="subtask.id"
                     role="button"
                     tabindex="0"
                     class="subtask-bar"
-                    :class="{ locked: task.locked, selected: subtask.id === selectedSubtaskId, expanded: isSubtaskExpandedVisible(subtask) }"
-                    :style="subtaskBarStyle(task, subtask)"
-                    :title="`${task.name} / ${subtask.name}: ${subtask.start} - ${endDate(subtask)}`"
-                    @click.stop="selectSubtask(task, subtask)"
-                    @dblclick.stop="startSubtaskTextEdit(task, subtask)"
-                    @contextmenu.stop="openContextMenu($event, task, subtask)"
-                    @pointerdown="beginSubtaskDrag($event, task, subtask, 'move')"
+                    :class="{ locked: row.type === 'task' && row.task.locked, selected: subtask.id === selectedSubtaskId, expanded: isSubtaskExpandedVisible(subtask) }"
+                    :style="row.type === 'task' ? subtaskBarStyle(row.task, subtask) : {}"
+                    :title="row.type === 'task' ? `${row.task.name} / ${subtask.name}: ${subtask.start} - ${endDate(subtask)}` : ''"
+                    @click.stop="row.type === 'task' && selectSubtask(row.task, subtask)"
+                    @dblclick.stop="row.type === 'task' && startSubtaskTextEdit(row.task, subtask)"
+                    @contextmenu.stop="row.type === 'task' && openContextMenu($event, row.task, subtask)"
+                    @pointerdown="row.type === 'task' && beginSubtaskDrag($event, row.task, subtask, 'move')"
                   >
                     <button
                       type="button"
                       class="fold-button"
                       :class="{ disabled: !subtask.children.length }"
                       :title="subtask.expanded ? '折叠' : '展开'"
-                      @click.stop="toggleSubtaskExpanded(task, subtask)"
+                      @click.stop="row.type === 'task' && toggleSubtaskExpanded(row.task, subtask)"
                       @pointerdown.stop
                     >
                       {{ subtask.expanded && subtask.children.length ? "v" : ">" }}
@@ -1202,7 +1832,11 @@ function isEditableTarget(target: EventTarget | null) {
                     </span>
                     <span v-else class="primary-line">{{ subtask.name }}</span>
                     <span v-if="!isSubtaskExpandedVisible(subtask) && subtask.duration >= 3" class="duration-label">{{ subtask.duration }} 天</span>
-                    <i class="resize-handle" title="调整工期" @pointerdown.stop="beginSubtaskDrag($event, task, subtask, 'resize')"></i>
+                    <i
+                      class="resize-handle"
+                      title="调整工期"
+                      @pointerdown.stop="row.type === 'task' && beginSubtaskDrag($event, row.task, subtask, 'resize')"
+                    ></i>
                   </div>
                 </div>
               </div>
@@ -1214,7 +1848,8 @@ function isEditableTarget(target: EventTarget | null) {
           <template v-if="selectedTask">
             <div class="inspector-field wide">
               <label>分组</label>
-              <select v-model="selectedTask.sectionId">
+              <select :value="selectedTask.sectionId" @change="setSelectedTaskSection">
+                <option value="">根目录</option>
                 <option v-for="section in doc.sections" :key="section.id" :value="section.id">
                   {{ section.name }}
                 </option>
@@ -1264,6 +1899,18 @@ function isEditableTarget(target: EventTarget | null) {
       <button type="button" :disabled="!contextMenu.subtaskId" @click="deleteSubtaskFromContext">
         删除子任务
       </button>
+    </div>
+
+    <div
+      v-if="taskListMenu"
+      class="context-menu task-list-menu"
+      :style="{ left: `${taskListMenu.x}px`, top: `${taskListMenu.y}px` }"
+      @click.stop
+    >
+      <button v-if="taskListMenu.target === 'task'" type="button" @click="deleteTaskFromListMenu">删除任务</button>
+      <button type="button" @click="addTaskFromListMenu">新建任务</button>
+      <button type="button" @click="addSectionFromListMenu">新建分组</button>
+      <button type="button" :disabled="!taskListMenu.sectionId" @click="dissolveSectionFromListMenu">解散分组</button>
     </div>
   </main>
 </template>
@@ -1485,9 +2132,21 @@ button.primary {
 .task-header,
 .task-row {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
+}
+
+.task-header {
+  grid-template-columns: 48px minmax(0, 1fr);
+}
+
+.task-row {
+  position: relative;
+  grid-template-columns: 26px 48px minmax(0, 1fr);
+}
+
+.task-row.section-row {
+  grid-template-columns: 26px 26px 20px minmax(0, 1fr);
 }
 
 .task-header {
@@ -1512,9 +2171,94 @@ button.primary {
   background: #eef4ff;
 }
 
+.task-row.dragging {
+  opacity: 0.48;
+}
+
+.task-row.drop-before::before,
+.task-row.drop-after::after {
+  content: "";
+  position: absolute;
+  right: 12px;
+  left: 12px;
+  z-index: 2;
+  height: 2px;
+  border-radius: 999px;
+  background: #2f6fed;
+}
+
+.task-row.drop-before::before {
+  top: 0;
+}
+
+.task-row.drop-after::after {
+  bottom: 0;
+}
+
+.task-row.drop-inside {
+  background: #eaf1ff;
+  outline: 2px solid rgba(47, 111, 237, 0.36);
+  outline-offset: -2px;
+}
+
+.task-rows {
+  position: relative;
+}
+
+.task-rows.drop-at-end::after {
+  content: "";
+  display: block;
+  height: 2px;
+  margin: 2px 12px;
+  border-radius: 999px;
+  background: #2f6fed;
+}
+
+.child-task-row .main-name {
+  padding-left: 14px;
+}
+
 .index-cell {
   color: #8b95a1;
   text-align: right;
+}
+
+.drag-handle,
+.section-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 5px;
+  padding: 0;
+  color: #7a8491;
+  background: transparent;
+}
+
+.drag-handle {
+  cursor: grab;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.section-icon {
+  color: #6b7480;
+}
+
+.section-row {
+  background: #fbfcfe;
+}
+
+.section-row.collapsed {
+  border-bottom-color: #dbe1ea;
+}
+
+.section-name {
+  color: #1d2b3a;
 }
 
 .name-input,
@@ -1640,6 +2384,23 @@ button.primary {
 
 .timeline-row.selected {
   background: rgba(47, 111, 237, 0.07);
+}
+
+.section-timeline-row {
+  background: #fbfcfe;
+}
+
+.section-timeline-label {
+  position: sticky;
+  left: 14px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  color: #68727f;
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .grid-unit {
@@ -1895,6 +2656,10 @@ button.primary {
   text-align: left;
 }
 
+.task-list-menu {
+  width: 160px;
+}
+
 @media (max-width: 1180px) {
   .topbar {
     grid-template-columns: minmax(220px, 1fr) auto;
@@ -1911,6 +2676,14 @@ button.primary {
   .task-header,
   .task-row {
     grid-template-columns: 40px minmax(0, 1fr);
+  }
+
+  .task-row {
+    grid-template-columns: 24px 40px minmax(0, 1fr);
+  }
+
+  .task-row.section-row {
+    grid-template-columns: 24px 24px 18px minmax(0, 1fr);
   }
 }
 </style>

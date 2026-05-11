@@ -27,6 +27,12 @@ export interface GanttTask {
 export interface GanttSection {
   id: string;
   name: string;
+  collapsed: boolean;
+}
+
+export interface GanttOutlineItem {
+  type: "section" | "task";
+  id: string;
 }
 
 export interface GanttDocument {
@@ -38,6 +44,7 @@ export interface GanttDocument {
   view: GanttScale;
   sections: GanttSection[];
   tasks: GanttTask[];
+  outline: GanttOutlineItem[];
   directives: string[];
 }
 
@@ -46,7 +53,7 @@ export interface GanttParseResult {
   warnings: string[];
 }
 
-export const MARKMYMIND_SCHEMA = "markmymind.gantt/v3";
+export const MARKMYMIND_SCHEMA = "markmymind.gantt/v4";
 export const DAY_MS = 86_400_000;
 export const RANGE_YEARS_BEFORE = 5;
 export const RANGE_YEARS_AFTER = 5;
@@ -175,12 +182,13 @@ export function createSampleDocument(): GanttDocument {
     excludes: "",
     todayMarker: "stroke-width:2px,stroke:#5b7cfa,opacity:0.85",
     view: "month",
-    sections: [{ id: sectionId, name: "默认分组" }],
+    sections: [{ id: sectionId, name: "默认分组", collapsed: false }],
     tasks: [
       createTask(sectionId, 1, start, "毕业论文", ["写初稿", "写综述"]),
       createTask(sectionId, 2, addDays(start, 1), "任务 2", ["任务 2"]),
       createTask(sectionId, 3, addDays(start, 2), "任务 3", ["任务 3"]),
     ],
+    outline: [{ type: "section", id: sectionId }],
     directives: [],
   };
 }
@@ -195,9 +203,11 @@ export function parseGanttSource(source: string): GanttParseResult {
   doc.title = "未命名甘特图";
   doc.sections = [];
   doc.tasks = [];
+  doc.outline = [];
   doc.directives = [];
 
-  let currentSection = ensureSection(doc, "默认分组");
+  let currentSection: GanttSection | null = null;
+  let lastSection: GanttSection | null = null;
   let lastTask: GanttTask | null = null;
 
   source
@@ -210,6 +220,13 @@ export function parseGanttSource(source: string): GanttParseResult {
         return;
       }
 
+      if (trimmed === "%% markmymind:root") {
+        currentSection = null;
+        lastSection = null;
+        lastTask = null;
+        return;
+      }
+
       const ganttMeta = readJsonComment(trimmed, "markmymind:gantt");
 
       if (ganttMeta) {
@@ -217,6 +234,14 @@ export function parseGanttSource(source: string): GanttParseResult {
           doc.view = ganttMeta.view;
         }
 
+        return;
+      }
+
+      const sectionMeta = readJsonComment(trimmed, "markmymind:section");
+
+      if (sectionMeta && lastSection) {
+        applySectionMetadata(doc, lastSection, sectionMeta);
+        currentSection = lastSection;
         return;
       }
 
@@ -266,6 +291,8 @@ export function parseGanttSource(source: string): GanttParseResult {
 
       if (trimmed.startsWith("section ")) {
         currentSection = ensureSection(doc, trimmed.slice("section ".length).trim() || "默认分组");
+        doc.outline.push({ type: "section", id: currentSection.id });
+        lastSection = currentSection;
         lastTask = null;
         return;
       }
@@ -281,25 +308,27 @@ export function parseGanttSource(source: string): GanttParseResult {
         }
       }
 
-      const parsedTask = parseTaskLine(trimmed, currentSection.id, doc.tasks.length + 1);
+      const parsedTask = parseTaskLine(trimmed, currentSection?.id ?? "", doc.tasks.length + 1);
 
       if (parsedTask) {
         doc.tasks.push(parsedTask);
         taskById.set(parsedTask.id, parsedTask);
+        if (!parsedTask.sectionId) {
+          doc.outline.push({ type: "task", id: parsedTask.id });
+        }
         lastTask = parsedTask;
+        lastSection = null;
         return;
       }
 
       warnings.push(`第 ${index + 1} 行暂未识别，保存时不会写回：${trimmed}`);
     });
 
-  if (!doc.sections.length) {
-    currentSection = ensureSection(doc, "默认分组");
-  }
-
   if (!doc.tasks.length) {
     const sample = createSampleDocument();
-    doc.tasks = sample.tasks.map((task) => ({ ...task, sectionId: currentSection.id }));
+    doc.sections = sample.sections;
+    doc.tasks = sample.tasks;
+    doc.outline = sample.outline;
     warnings.push("没有解析到任务，已创建默认任务。");
   }
 
@@ -325,6 +354,8 @@ export function parseGanttSource(source: string): GanttParseResult {
     return nextTask;
   });
 
+  normalizeDocumentStructure(doc);
+
   return { doc, warnings };
 }
 
@@ -346,35 +377,68 @@ export function serializeGanttDocument(doc: GanttDocument): string {
     lines.push(`    todayMarker ${sanitizeLine(doc.todayMarker)}`);
   }
 
-  doc.sections.forEach((section) => {
-    lines.push(`    section ${sanitizeLine(section.name || "默认分组")}`);
+  const sectionById = new Map(doc.sections.map((section) => [section.id, section]));
+  const taskById = new Map(doc.tasks.map((task) => [task.id, task]));
+  let writingSection = false;
 
-    doc.tasks
-      .filter((task) => task.sectionId === section.id)
-      .forEach((task) => {
-        lines.push(`    ${serializeTask(task)}`);
-        lines.push(
-          `    %% markmymind:task ${JSON.stringify({
-            id: task.id,
-            sectionId: task.sectionId,
-            locked: task.locked,
-            color: task.color || DEFAULT_TASK_COLOR,
-          })}`,
-        );
+  function writeTask(task: GanttTask) {
+    lines.push(`    ${serializeTask(task)}`);
+    lines.push(
+      `    %% markmymind:task ${JSON.stringify({
+        id: task.id,
+        sectionId: task.sectionId,
+        locked: task.locked,
+        color: task.color || DEFAULT_TASK_COLOR,
+      })}`,
+    );
 
-        ensureTaskSubtasks(task).forEach((subtask) => {
-          lines.push(`    ${serializeSubtask(task, subtask)}`);
-          lines.push(
-            `    %% markmymind:subtask ${JSON.stringify({
-              id: subtask.id,
-              taskId: task.id,
-              color: subtask.color || task.color || DEFAULT_SUBTASK_COLOR,
-              expanded: subtask.children.length > 0 && subtask.expanded,
-              children: subtask.children,
-            })}`,
-          );
-        });
-      });
+    ensureTaskSubtasks(task).forEach((subtask) => {
+      lines.push(`    ${serializeSubtask(task, subtask)}`);
+      lines.push(
+        `    %% markmymind:subtask ${JSON.stringify({
+          id: subtask.id,
+          taskId: task.id,
+          color: subtask.color || task.color || DEFAULT_SUBTASK_COLOR,
+          expanded: subtask.children.length > 0 && subtask.expanded,
+          children: subtask.children,
+        })}`,
+      );
+    });
+  }
+
+  normalizedOutlineItems(doc).forEach((item) => {
+    if (item.type === "section") {
+      const section = sectionById.get(item.id);
+
+      if (!section) {
+        return;
+      }
+
+      lines.push(`    section ${sanitizeLine(section.name || "默认分组")}`);
+      lines.push(
+        `    %% markmymind:section ${JSON.stringify({
+          id: section.id,
+          collapsed: section.collapsed,
+        })}`,
+      );
+
+      doc.tasks.filter((task) => task.sectionId === section.id).forEach(writeTask);
+      writingSection = true;
+      return;
+    }
+
+    const task = taskById.get(item.id);
+
+    if (!task || task.sectionId) {
+      return;
+    }
+
+    if (writingSection) {
+      lines.push("    %% markmymind:root");
+      writingSection = false;
+    }
+
+    writeTask(task);
   });
 
   return `${lines.join("\n")}\n`;
@@ -416,6 +480,14 @@ export function createSubtask(
     color,
     expanded: false,
     children: [],
+  };
+}
+
+export function createSection(index: number, name = `新分组 ${index}`): GanttSection {
+  return {
+    id: `section-${Date.now().toString(36)}-${index}`,
+    name,
+    collapsed: false,
   };
 }
 
@@ -578,17 +650,104 @@ function applyTaskMetadata(task: GanttTask, meta: Record<string, unknown> | unde
   };
 }
 
+function applySectionMetadata(doc: GanttDocument, section: GanttSection, meta: Record<string, unknown>) {
+  const previousId = section.id;
+
+  if (typeof meta.id === "string" && meta.id) {
+    section.id = meta.id;
+  }
+
+  section.collapsed = meta.collapsed === true;
+
+  if (section.id === previousId) {
+    return;
+  }
+
+  doc.outline.forEach((item) => {
+    if (item.type === "section" && item.id === previousId) {
+      item.id = section.id;
+    }
+  });
+
+  doc.tasks.forEach((task) => {
+    if (task.sectionId === previousId) {
+      task.sectionId = section.id;
+    }
+  });
+}
+
+function normalizeDocumentStructure(doc: GanttDocument) {
+  doc.sections = doc.sections.map((section, index) => ({
+    id: section.id || `section-${index + 1}`,
+    name: section.name || `分组 ${index + 1}`,
+    collapsed: section.collapsed === true,
+  }));
+
+  const sectionIds = new Set(doc.sections.map((section) => section.id));
+
+  doc.tasks = doc.tasks.map((task) => ({
+    ...task,
+    sectionId: sectionIds.has(task.sectionId) ? task.sectionId : "",
+    locked: task.locked === true,
+    color: task.color || DEFAULT_TASK_COLOR,
+    subtasks: ensureTaskSubtasks(task).map((subtask) => ({
+      ...subtask,
+      duration: normalizeDuration(subtask.duration),
+      color: subtask.color || task.color || DEFAULT_SUBTASK_COLOR,
+      expanded: subtask.children.length > 0 && subtask.expanded === true,
+      children: subtask.children,
+    })),
+  }));
+
+  doc.outline = normalizedOutlineItems(doc);
+}
+
+function normalizedOutlineItems(doc: GanttDocument): GanttOutlineItem[] {
+  const sectionById = new Map(doc.sections.map((section) => [section.id, section]));
+  const taskById = new Map(doc.tasks.map((task) => [task.id, task]));
+  const seenSections = new Set<string>();
+  const seenRootTasks = new Set<string>();
+  const items: GanttOutlineItem[] = [];
+
+  (doc.outline ?? []).forEach((item) => {
+    if (item.type === "section" && sectionById.has(item.id) && !seenSections.has(item.id)) {
+      items.push({ type: "section", id: item.id });
+      seenSections.add(item.id);
+      return;
+    }
+
+    const task = item.type === "task" ? taskById.get(item.id) : null;
+
+    if (task && !task.sectionId && !seenRootTasks.has(task.id)) {
+      items.push({ type: "task", id: task.id });
+      seenRootTasks.add(task.id);
+    }
+  });
+
+  doc.sections.forEach((section) => {
+    if (!seenSections.has(section.id)) {
+      items.push({ type: "section", id: section.id });
+      seenSections.add(section.id);
+    }
+  });
+
+  doc.tasks.forEach((task) => {
+    if (!task.sectionId && !seenRootTasks.has(task.id)) {
+      items.push({ type: "task", id: task.id });
+      seenRootTasks.add(task.id);
+    }
+  });
+
+  return items;
+}
+
 function ensureSection(doc: GanttDocument, name: string): GanttSection {
   const normalizedName = sanitizeLine(name || "默认分组");
-  const existing = doc.sections.find((section) => section.name === normalizedName);
-
-  if (existing) {
-    return existing;
-  }
 
   const section = {
     id: `section-${doc.sections.length + 1}`,
     name: normalizedName,
+    collapsed: false,
   };
 
   doc.sections.push(section);
