@@ -29,7 +29,6 @@ import {
   parseIso,
   renderRangeAroundToday,
   serializeGanttDocument,
-  startOfWeek,
   statusColor,
   taskStart,
   todayIso,
@@ -61,6 +60,7 @@ interface ContextMenuState {
   y: number;
   taskId: string;
   subtaskId?: string;
+  date?: string;
 }
 
 interface UnitSegment {
@@ -70,6 +70,8 @@ interface UnitSegment {
   end: string;
   days: number;
 }
+
+const TASK_ROW_HEIGHT = 72;
 
 const doc = ref<GanttDocument>(createSampleDocument());
 const currentPath = ref<string | null>(null);
@@ -120,18 +122,18 @@ const visibleDayCount = computed(() => renderRange.value.days);
 
 const dayWidth = computed(() => {
   if (doc.value.view === "week") {
-    return 16;
+    return 96;
   }
 
   if (doc.value.view === "month") {
-    return 8;
+    return 54;
   }
 
   if (doc.value.view === "quarter") {
-    return 3.5;
+    return 14;
   }
 
-  return 1.6;
+  return 2.7;
 });
 
 const timelineWidth = computed(() => Math.ceil(visibleDayCount.value * dayWidth.value));
@@ -162,22 +164,20 @@ const yearSegments = computed<UnitSegment[]>(() => {
 
 const unitSegments = computed<UnitSegment[]>(() => {
   const segments: UnitSegment[] = [];
-  let cursor = doc.value.view === "week" ? startOfWeek(renderRange.value.start) : renderRange.value.start;
+  let cursor = renderRange.value.start;
 
   while (cursor < renderRange.value.end) {
-    const start = cursor < renderRange.value.start ? renderRange.value.start : cursor;
+    const start = cursor;
     const rawEnd = nextUnit(cursor);
     const end = rawEnd > renderRange.value.end ? renderRange.value.end : rawEnd;
 
-    if (end > start) {
-      segments.push({
-        key: `${doc.value.view}-${cursor}`,
-        label: unitLabel(cursor),
-        start,
-        end,
-        days: differenceInDays(start, end),
-      });
-    }
+    segments.push({
+      key: `${doc.value.view}-${cursor}`,
+      label: unitLabel(start, end),
+      start,
+      end,
+      days: differenceInDays(start, end),
+    });
 
     cursor = rawEnd;
   }
@@ -193,7 +193,7 @@ const todayLineStyle = computed(() => {
   }
 
   return {
-    left: `${offset * dayWidth.value + dayWidth.value / 2}px`,
+    left: `${dateToX(todayIso()) + dayWidth.value / 2}px`,
   };
 });
 
@@ -304,8 +304,9 @@ function selectSubtask(task: GanttTask, subtask: GanttSubtask) {
 }
 
 function setScale(scale: GanttScale) {
+  const anchorDate = centeredTimelineDate();
   doc.value.view = scale;
-  nextTick(() => jumpToToday());
+  nextTick(() => scrollToDate(anchorDate, 0.5));
 }
 
 function jumpToToday() {
@@ -421,6 +422,7 @@ function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubt
     y: event.clientY,
     taskId: task.id,
     subtaskId: subtask?.id,
+    date: dateFromTimelineEvent(event),
   };
 }
 
@@ -436,7 +438,14 @@ function addSubtaskFromContext() {
   }
 
   const anchor = contextSubtask() ?? task.subtasks[task.subtasks.length - 1];
-  const subtask = createSubtask(doc.value.tasks.indexOf(task) + 1, task.subtasks.length + 1, `子任务 ${task.subtasks.length + 1}`, anchor?.start ?? todayIso(), task.color);
+  const start = contextMenu.value?.date ?? anchor?.start ?? todayIso();
+  const subtask = createSubtask(
+    doc.value.tasks.indexOf(task) + 1,
+    task.subtasks.length + 1,
+    `子任务 ${task.subtasks.length + 1}`,
+    start,
+    task.color,
+  );
   task.subtasks.push(subtask);
   selectSubtask(task, subtask);
   statusMessage.value = `已为 ${task.name} 添加子任务`;
@@ -473,30 +482,27 @@ function contextSubtask() {
 }
 
 function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask, index: number) {
-  const left = differenceInDays(visibleStart.value, subtask.start) * dayWidth.value;
+  const left = dateToX(subtask.start);
   const width = Math.max(dayWidth.value * normalizeDuration(subtask.duration), 34);
+  const offset = Math.min(index * 3, 18);
 
   return {
     left: `${left}px`,
-    top: `${8 + index * 38}px`,
+    top: `${20 + offset}px`,
     width: `${width}px`,
     background: subtask.color || task.color || statusColor(task.status),
   };
 }
 
-function rowStyle(task: GanttTask) {
+function rowStyle() {
   return {
-    height: `${taskRowHeight(task)}px`,
+    height: `${TASK_ROW_HEIGHT}px`,
   };
-}
-
-function taskRowHeight(task: GanttTask) {
-  return Math.max(58, 36 + ensureTaskSubtasks(task).length * 38);
 }
 
 function segmentStyle(segment: UnitSegment) {
   return {
-    width: `${Math.max(1, segment.days * dayWidth.value)}px`,
+    width: `${Math.max(1, dateToX(segment.end) - dateToX(segment.start))}px`,
   };
 }
 
@@ -549,37 +555,59 @@ function applySourceDraft() {
 }
 
 function nextUnit(iso: string) {
-  if (doc.value.view === "week") {
+  if (doc.value.view === "quarter") {
     return addDays(iso, 7);
   }
 
-  if (doc.value.view === "quarter") {
-    return addMonths(iso, 3);
-  }
-
   if (doc.value.view === "year") {
-    return addMonths(iso, 12);
+    return addMonths(iso, 1);
   }
 
-  return addMonths(iso, 1);
+  return addDays(iso, 1);
 }
 
-function unitLabel(iso: string) {
-  const date = parseIso(iso);
-
-  if (doc.value.view === "week") {
-    return `${date.getUTCMonth() + 1}/${date.getUTCDate()}`;
-  }
+function unitLabel(start: string, end: string) {
+  const date = parseIso(start);
 
   if (doc.value.view === "quarter") {
-    return `Q${Math.floor(date.getUTCMonth() / 3) + 1}`;
+    return `${shortDate(start)}-${shortDate(addDays(end, -1))}`;
   }
 
   if (doc.value.view === "year") {
-    return `${date.getUTCFullYear()}`;
+    return `${date.getUTCMonth() + 1}月`;
   }
 
-  return `${date.getUTCMonth() + 1}月`;
+  return shortDate(start);
+}
+
+function dateToX(iso: string) {
+  return differenceInDays(visibleStart.value, iso) * dayWidth.value;
+}
+
+function xToDate(x: number) {
+  const clampedX = Math.max(0, Math.min(timelineWidth.value, x));
+  return addDays(visibleStart.value, Math.floor(clampedX / dayWidth.value));
+}
+
+function dateFromTimelineEvent(event: MouseEvent) {
+  const pane = timelinePane.value;
+
+  if (!pane || !pane.contains(event.target as Node)) {
+    return undefined;
+  }
+
+  const rect = pane.getBoundingClientRect();
+  return xToDate(pane.scrollLeft + event.clientX - rect.left);
+}
+
+function centeredTimelineDate() {
+  const pane = timelinePane.value;
+
+  if (!pane) {
+    return todayIso();
+  }
+
+  return xToDate(pane.scrollLeft + pane.clientWidth / 2);
 }
 
 function scrollToDate(iso: string, viewportRatio: number) {
@@ -589,8 +617,13 @@ function scrollToDate(iso: string, viewportRatio: number) {
     return;
   }
 
-  const left = differenceInDays(visibleStart.value, iso) * dayWidth.value - pane.clientWidth * viewportRatio;
+  const left = dateToX(iso) - pane.clientWidth * viewportRatio;
   pane.scrollLeft = Math.max(0, left);
+}
+
+function shortDate(iso: string): string {
+  const date = parseIso(iso);
+  return `${date.getUTCMonth() + 1}/${date.getUTCDate()}`;
 }
 
 function formatDisplayDate(iso: string): string {
@@ -698,30 +731,33 @@ function statusColorMap() {
                 :key="task.id"
                 class="task-row"
                 :class="{ selected: task.id === selectedTaskId }"
-                :style="rowStyle(task)"
+                :style="rowStyle()"
                 @click="selectTask(task)"
                 @contextmenu="openContextMenu($event, task)"
               >
                 <span class="index-cell">{{ index + 1 }}</span>
                 <div class="task-name-stack">
                   <input v-model="task.name" class="name-input main-name" aria-label="主任务名" @blur="normalizeTask(task)" />
-                  <div v-for="subtask in task.subtasks" :key="subtask.id" class="subtask-edit-row">
+                  <div class="inline-subtask-strip">
                     <input
+                      v-for="subtask in task.subtasks"
+                      :key="subtask.id"
                       v-model="subtask.name"
                       class="name-input subtask-name-input"
+                      :class="{ active: subtask.id === selectedSubtaskId }"
                       aria-label="子任务名"
                       @click.stop="selectSubtask(task, subtask)"
                       @contextmenu.stop="openContextMenu($event, task, subtask)"
                     />
                   </div>
                 </div>
-                <div class="subtask-field-stack">
-                  <div class="stack-spacer"></div>
+                <div class="inline-subtask-strip field-strip">
                   <input
                     v-for="subtask in task.subtasks"
                     :key="`${subtask.id}-start`"
                     v-model="subtask.start"
                     class="date-input"
+                    :class="{ active: subtask.id === selectedSubtaskId }"
                     type="date"
                     aria-label="子任务开始日期"
                     @click.stop="selectSubtask(task, subtask)"
@@ -729,13 +765,13 @@ function statusColorMap() {
                     @contextmenu.stop="openContextMenu($event, task, subtask)"
                   />
                 </div>
-                <div class="subtask-field-stack">
-                  <div class="stack-spacer"></div>
+                <div class="inline-subtask-strip field-strip">
                   <input
                     v-for="subtask in task.subtasks"
                     :key="`${subtask.id}-duration`"
                     v-model.number="subtask.duration"
                     class="duration-input"
+                    :class="{ active: subtask.id === selectedSubtaskId }"
                     type="number"
                     min="1"
                     aria-label="子任务工期"
@@ -778,7 +814,7 @@ function statusColorMap() {
                   :key="task.id"
                   class="timeline-row"
                   :class="{ selected: task.id === selectedTaskId }"
-                  :style="rowStyle(task)"
+                  :style="rowStyle()"
                   @click="selectTask(task)"
                   @contextmenu="openContextMenu($event, task)"
                 >
@@ -1086,7 +1122,7 @@ button.primary {
 
 .gantt-board {
   display: grid;
-  grid-template-columns: 560px minmax(0, 1fr);
+  grid-template-columns: 600px minmax(0, 1fr);
   min-height: 0;
   flex: 1;
   border-bottom: 1px solid #dbe1ea;
@@ -1102,8 +1138,8 @@ button.primary {
 .task-header,
 .task-row {
   display: grid;
-  grid-template-columns: 48px minmax(160px, 1fr) 142px 80px;
-  align-items: start;
+  grid-template-columns: 48px minmax(160px, 1fr) 170px 88px;
+  align-items: center;
   gap: 8px;
 }
 
@@ -1112,7 +1148,6 @@ button.primary {
   top: 0;
   z-index: 5;
   height: 76px;
-  align-items: center;
   padding: 0 12px;
   border-bottom: 1px solid #dbe1ea;
   color: #6c7581;
@@ -1122,7 +1157,7 @@ button.primary {
 }
 
 .task-row {
-  padding: 10px 12px;
+  padding: 8px 12px;
   border-bottom: 1px solid #edf1f5;
 }
 
@@ -1131,26 +1166,28 @@ button.primary {
 }
 
 .index-cell {
-  padding-top: 4px;
   color: #8b95a1;
   text-align: right;
 }
 
-.task-name-stack,
-.subtask-field-stack {
+.task-name-stack {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
-.subtask-edit-row {
+.inline-subtask-strip {
   display: flex;
   min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
 }
 
-.stack-spacer {
-  height: 30px;
+.field-strip {
+  align-items: center;
 }
 
 .name-input,
@@ -1173,25 +1210,32 @@ button.primary {
 }
 
 .subtask-name-input {
-  padding-left: 18px;
+  flex: 0 0 92px;
+  padding: 0 8px;
   color: #4d5967;
+  background: #f6f8fb;
 }
 
-.subtask-name-input::before {
-  content: "";
+.date-input {
+  flex: 0 0 132px;
+  padding: 0 6px;
+}
+
+.duration-input {
+  flex: 0 0 56px;
+  text-align: center;
 }
 
 .name-input:focus,
 .date-input:focus,
 .duration-input:focus,
 .task-inspector input:focus,
-.task-inspector select:focus {
+.task-inspector select:focus,
+.name-input.active,
+.date-input.active,
+.duration-input.active {
   border-color: #9cb8f4;
   background: #ffffff;
-}
-
-.duration-input {
-  text-align: center;
 }
 
 .add-row {
@@ -1479,12 +1523,12 @@ button.primary {
   }
 
   .gantt-board {
-    grid-template-columns: 500px minmax(0, 1fr);
+    grid-template-columns: 540px minmax(0, 1fr);
   }
 
   .task-header,
   .task-row {
-    grid-template-columns: 40px minmax(140px, 1fr) 130px 70px;
+    grid-template-columns: 40px minmax(140px, 1fr) 150px 76px;
   }
 }
 </style>
