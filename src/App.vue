@@ -27,7 +27,6 @@ import {
   parseIso,
   renderRangeAroundToday,
   serializeGanttDocument,
-  statusColor,
   taskStart,
   todayIso,
   type GanttDocument,
@@ -74,6 +73,7 @@ const TASK_ROW_HEIGHT = 72;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
+const DEFAULT_BAR_COLOR = "#2f6fed";
 
 const doc = ref<GanttDocument>(createSampleDocument());
 const currentPath = ref<string | null>(null);
@@ -694,7 +694,40 @@ function toggleSubtaskExpanded(task: GanttTask, subtask: GanttSubtask) {
     return;
   }
 
-  subtask.expanded = !subtask.expanded;
+  if (subtask.expanded) {
+    subtask.expanded = false;
+    return;
+  }
+
+  const targetScale = expansionScaleForSubtask(subtask);
+  if (doc.value.view !== targetScale) {
+    doc.value.view = targetScale;
+    nextTick(() => scrollToDate(subtask.start, 0.35));
+  }
+
+  subtask.expanded = true;
+}
+
+function expansionScaleForSubtask(subtask: GanttSubtask): GanttScale {
+  const duration = normalizeDuration(subtask.duration);
+
+  if (canRenderExpandedInScale(doc.value.view, duration)) {
+    return doc.value.view;
+  }
+
+  if (duration <= 1) {
+    return "day";
+  }
+
+  if (duration === 2) {
+    return "week";
+  }
+
+  if (duration <= 9) {
+    return "month";
+  }
+
+  return "quarter";
 }
 
 function closeContextMenu() {
@@ -760,7 +793,7 @@ function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
     top: "12px",
     width: `${layout.width}px`,
     height: `${layout.height}px`,
-    background: subtask.color || task.color || statusColor(task.status),
+    background: subtask.color || task.color || DEFAULT_BAR_COLOR,
   };
 }
 
@@ -844,7 +877,31 @@ function wrappedLineCount(text: string, width: number) {
 }
 
 function isSubtaskExpandedVisible(subtask: GanttSubtask) {
-  return subtask.expanded && subtask.children.length > 0 && doc.value.view === "day";
+  return (
+    subtask.expanded &&
+    subtask.children.length > 0 &&
+    canRenderExpandedInScale(doc.value.view, normalizeDuration(subtask.duration))
+  );
+}
+
+function canRenderExpandedInScale(scale: GanttScale, duration: number) {
+  if (scale === "day") {
+    return true;
+  }
+
+  if (scale === "week") {
+    return duration >= 2;
+  }
+
+  if (scale === "month") {
+    return duration >= 3;
+  }
+
+  if (scale === "quarter") {
+    return duration >= 10;
+  }
+
+  return false;
 }
 
 function segmentStyle(segment: UnitSegment) {

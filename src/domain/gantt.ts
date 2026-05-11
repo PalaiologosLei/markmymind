@@ -1,5 +1,4 @@
 export type GanttScale = "day" | "week" | "month" | "quarter" | "year";
-export type GanttStatus = "todo" | "active" | "done" | "critical" | "milestone";
 
 export interface GanttSubtask {
   id: string;
@@ -20,8 +19,6 @@ export interface GanttTask {
   id: string;
   name: string;
   sectionId: string;
-  status: GanttStatus;
-  progress: number;
   locked: boolean;
   color: string;
   subtasks: GanttSubtask[];
@@ -54,21 +51,9 @@ export const DAY_MS = 86_400_000;
 export const RANGE_YEARS_BEFORE = 5;
 export const RANGE_YEARS_AFTER = 5;
 
-const STATUS_TOKENS: Record<string, GanttStatus> = {
-  active: "active",
-  done: "done",
-  crit: "critical",
-  critical: "critical",
-  milestone: "milestone",
-};
-
-const DEFAULT_COLORS: Record<GanttStatus, string> = {
-  todo: "#3867d6",
-  active: "#2f6fed",
-  done: "#16a085",
-  critical: "#d84f4b",
-  milestone: "#8e5ad8",
-};
+const IGNORED_MERMAID_STATUS_TOKENS = new Set(["active", "done", "crit", "critical", "milestone"]);
+const DEFAULT_TASK_COLOR = "#3867d6";
+const DEFAULT_SUBTASK_COLOR = "#2f6fed";
 
 export function todayIso(): string {
   return formatIso(new Date());
@@ -372,10 +357,8 @@ export function serializeGanttDocument(doc: GanttDocument): string {
           `    %% markmymind:task ${JSON.stringify({
             id: task.id,
             sectionId: task.sectionId,
-            status: task.status,
-            progress: clampNumber(task.progress, 0, 100, 0),
             locked: task.locked,
-            color: task.color || DEFAULT_COLORS[task.status],
+            color: task.color || DEFAULT_TASK_COLOR,
           })}`,
         );
 
@@ -385,7 +368,7 @@ export function serializeGanttDocument(doc: GanttDocument): string {
             `    %% markmymind:subtask ${JSON.stringify({
               id: subtask.id,
               taskId: task.id,
-              color: subtask.color || task.color || DEFAULT_COLORS[task.status],
+              color: subtask.color || task.color || DEFAULT_SUBTASK_COLOR,
               expanded: subtask.children.length > 0 && subtask.expanded,
               children: subtask.children,
             })}`,
@@ -404,15 +387,12 @@ export function createTask(
   name = `新任务 ${index}`,
   subtaskNames = [`子任务 ${index}`],
 ): GanttTask {
-  const status: GanttStatus = index === 1 ? "active" : "todo";
-  const color = statusColor(status);
+  const color = index === 1 ? DEFAULT_SUBTASK_COLOR : DEFAULT_TASK_COLOR;
 
   return {
     id: `task-${Date.now().toString(36)}-${index}`,
     name,
     sectionId,
-    status,
-    progress: status === "active" ? 35 : 0,
     locked: false,
     color,
     subtasks: subtaskNames.map((subtaskName, subtaskIndex) =>
@@ -426,7 +406,7 @@ export function createSubtask(
   subtaskIndex: number,
   name = `子任务 ${subtaskIndex}`,
   start = todayIso(),
-  color = DEFAULT_COLORS.todo,
+  color = DEFAULT_SUBTASK_COLOR,
 ): GanttSubtask {
   return {
     id: `subtask-${Date.now().toString(36)}-${taskIndex}-${subtaskIndex}`,
@@ -451,14 +431,6 @@ export function normalizeDuration(value: number): number {
   return Math.max(1, Math.round(value));
 }
 
-export function normalizeProgress(value: number): number {
-  return clampNumber(value, 0, 100, 0);
-}
-
-export function statusColor(status: GanttStatus): string {
-  return DEFAULT_COLORS[status];
-}
-
 function parseTaskLine(line: string, sectionId: string, fallbackIndex: number): GanttTask | null {
   const colonIndex = line.indexOf(":");
 
@@ -472,20 +444,17 @@ function parseTaskLine(line: string, sectionId: string, fallbackIndex: number): 
   let id = "";
   let start = "";
   let duration = 1;
-  let status: GanttStatus = "todo";
   let isCustomTask = false;
 
   for (const token of tokens) {
     const lowered = token.toLowerCase();
-    const tokenStatus = STATUS_TOKENS[lowered];
 
     if (lowered === "task") {
       isCustomTask = true;
       continue;
     }
 
-    if (tokenStatus) {
-      status = tokenStatus;
+    if (IGNORED_MERMAID_STATUS_TOKENS.has(lowered)) {
       continue;
     }
 
@@ -519,14 +488,12 @@ function parseTaskLine(line: string, sectionId: string, fallbackIndex: number): 
     id = normalizeTaskId(name, fallbackIndex);
   }
 
-  const color = DEFAULT_COLORS[status];
+  const color = DEFAULT_TASK_COLOR;
 
   return {
     id,
     name,
     sectionId,
-    status,
-    progress: status === "done" ? 100 : status === "active" ? 35 : 0,
     locked: false,
     color,
     subtasks: isCustomTask
@@ -579,7 +546,7 @@ function parseSubtaskLine(
       name,
       start,
       duration,
-      color: DEFAULT_COLORS.todo,
+      color: DEFAULT_SUBTASK_COLOR,
       expanded: false,
       children: [],
     },
@@ -603,15 +570,11 @@ function applyTaskMetadata(task: GanttTask, meta: Record<string, unknown> | unde
     return task;
   }
 
-  const status = isGanttStatus(meta.status) ? meta.status : task.status;
-
   return {
     ...task,
-    status,
     sectionId: typeof meta.sectionId === "string" && meta.sectionId ? meta.sectionId : task.sectionId,
-    progress: clampNumber(meta.progress, 0, 100, task.progress),
     locked: typeof meta.locked === "boolean" ? meta.locked : task.locked,
-    color: typeof meta.color === "string" && meta.color ? meta.color : task.color || DEFAULT_COLORS[status],
+    color: typeof meta.color === "string" && meta.color ? meta.color : task.color || DEFAULT_TASK_COLOR,
   };
 }
 
@@ -704,20 +667,6 @@ function sanitizeTaskName(value: string): string {
   return sanitizeLine(value).replace(/:/g, "-");
 }
 
-function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
-  const numericValue = typeof value === "number" ? value : Number(value);
-
-  if (!Number.isFinite(numericValue)) {
-    return fallback;
-  }
-
-  return Math.max(min, Math.min(max, Math.round(numericValue)));
-}
-
 function isGanttScale(value: unknown): value is GanttScale {
   return value === "day" || value === "week" || value === "month" || value === "quarter" || value === "year";
-}
-
-function isGanttStatus(value: unknown): value is GanttStatus {
-  return value === "todo" || value === "active" || value === "done" || value === "critical" || value === "milestone";
 }
