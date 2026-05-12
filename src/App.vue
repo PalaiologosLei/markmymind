@@ -147,7 +147,6 @@ const SUBTASK_BAR_TOP = 38;
 const SUBTASK_META_TOP = 9;
 const SUBTASK_ROW_BOTTOM = 12;
 const LINK_ROW_GAP = 10;
-const LINK_CONNECTOR_HEIGHT = 20;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
@@ -894,13 +893,19 @@ function updateLinkedItemDrag(
   deltaDays: number,
 ) {
   if (drag.mode === "move") {
-    link.start = clampLinkStart(parent, link, addDays(drag.initialStart, deltaDays));
+    const nextStart = clampLinkStart(parent, link, addDays(drag.initialStart, deltaDays));
+    if (!linkConflicts(parent, link, nextStart, link.duration)) {
+      link.start = nextStart;
+    }
     return;
   }
 
   const parentEnd = endDate(parent);
   const maxDuration = Math.max(1, differenceInDays(link.start, parentEnd));
-  link.duration = Math.min(normalizeDuration(drag.initialDuration + deltaDays), maxDuration);
+  const nextDuration = Math.min(normalizeDuration(drag.initialDuration + deltaDays), maxDuration);
+  if (!linkConflicts(parent, link, link.start, nextDuration)) {
+    link.duration = nextDuration;
+  }
 }
 
 function clampLinkStart(parent: GanttSubtask, link: GanttLinkedItem, start: string) {
@@ -920,6 +925,39 @@ function clampLinkStart(parent: GanttSubtask, link: GanttLinkedItem, start: stri
 function minimumSubtaskDurationForLinks(subtask: GanttSubtask) {
   const requiredEnds = subtask.links.map((link) => differenceInDays(subtask.start, endDate(link)));
   return Math.max(1, ...requiredEnds);
+}
+
+function linkConflicts(parent: GanttSubtask, link: GanttLinkedItem, start: string, duration: number) {
+  const end = addDays(start, normalizeDuration(duration));
+
+  return parent.links.some((sibling) => {
+    if (sibling.id === link.id) {
+      return false;
+    }
+
+    return start < endDate(sibling) && end > sibling.start;
+  });
+}
+
+function firstAvailableLinkStart(parent: GanttSubtask, preferredStart: string, duration: number) {
+  const link = { id: "__new__", duration: normalizeDuration(duration) } as GanttLinkedItem;
+  const clampedPreferred = clampLinkStart(parent, link, preferredStart);
+
+  if (!linkConflicts(parent, link, clampedPreferred, link.duration)) {
+    return clampedPreferred;
+  }
+
+  const maxOffset = Math.max(0, normalizeDuration(parent.duration) - link.duration);
+
+  for (let offset = 0; offset <= maxOffset; offset += 1) {
+    const start = addDays(parent.start, offset);
+
+    if (!linkConflicts(parent, link, start, link.duration)) {
+      return start;
+    }
+  }
+
+  return "";
 }
 
 function moveDraggedSubtaskToDropTarget(pointer: Pick<DragState, "pointerX" | "pointerY">) {
@@ -1061,12 +1099,13 @@ function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubt
   finishSubtaskTextEdit();
   taskListMenu.value = null;
   selectTask(task, subtask);
+  const date = dateFromTimelineEvent(event);
   contextMenu.value = {
     x: event.clientX,
     y: event.clientY,
     taskId: task.id,
     subtaskId: subtask?.id,
-    date: dateFromTimelineEvent(event),
+    date,
   };
 }
 
@@ -1684,17 +1723,20 @@ function addLinkFromContext() {
   }
 
   const linkIndex = subtask.links.length + 1;
-  const start = clampLinkStart(
-    subtask,
-    { duration: 1 } as GanttLinkedItem,
-    contextMenu.value?.date ?? subtask.start,
-  );
+  const start = firstAvailableLinkStart(subtask, contextMenu.value?.date ?? subtask.start, 1);
+
+  if (!start) {
+    statusMessage.value = "当前一级子任务下方没有空间创建新的关联项";
+    closeContextMenu();
+    return;
+  }
+
   const link: GanttLinkedItem = {
     id: createLinkId(subtask.id, subtask.links.length),
     name: `关联项 ${linkIndex}`,
     start,
     duration: 1,
-    color: subtask.color || task.color || appSettings.value.defaultSubtaskColor,
+    color: linkedItemColor(subtask),
     completed: false,
     expanded: false,
     children: [],
@@ -1762,6 +1804,16 @@ function contextLink() {
   return subtask.links.find((link) => link.id === contextMenu.value?.linkId) ?? null;
 }
 
+function canAddLinkFromContext() {
+  const subtask = contextSubtask();
+
+  if (!subtask || contextMenu.value?.linkId) {
+    return false;
+  }
+
+  return Boolean(firstAvailableLinkStart(subtask, contextMenu.value?.date ?? subtask.start, 1));
+}
+
 function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
   const layout = subtaskLayout(task, subtask);
   const color = subtask.color || task.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR;
@@ -1777,10 +1829,10 @@ function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
   };
 }
 
-function linkBarStyle(task: GanttTask, parent: GanttSubtask, link: GanttLinkedItem, linkIndex: number) {
+function linkBarStyle(task: GanttTask, parent: GanttSubtask, link: GanttLinkedItem) {
   const layout = subtaskLayout(task, parent);
-  const top = linkTop(parent, linkIndex, layout.height);
-  const color = link.color || parent.color || task.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR;
+  const top = linkTop(parent, layout.height);
+  const color = linkedItemColor(parent);
 
   return {
     left: `${dateToX(link.start)}px`,
@@ -1793,28 +1845,18 @@ function linkBarStyle(task: GanttTask, parent: GanttSubtask, link: GanttLinkedIt
   };
 }
 
-function linkMetaStyle(task: GanttTask, parent: GanttSubtask, linkIndex: number) {
+function linkMetaStyle(task: GanttTask, parent: GanttSubtask, link: GanttLinkedItem) {
   const layout = subtaskLayout(task, parent);
+  const top = linkTop(parent, layout.height);
 
   return {
-    left: `${layout.left}px`,
-    top: `${linkTop(parent, linkIndex, layout.height) - 29}px`,
+    left: `${dateToX(link.start)}px`,
+    top: `${top - 29}px`,
   };
 }
 
-function linkConnectorStyle(task: GanttTask, parent: GanttSubtask, link: GanttLinkedItem, linkIndex: number) {
-  const layout = subtaskLayout(task, parent);
-  const parentCenter = layout.left + layout.width / 2;
-  const linkCenter = dateToX(link.start) + renderedSubtaskWidth(link) / 2;
-  const left = Math.min(parentCenter, linkCenter);
-  const width = Math.abs(parentCenter - linkCenter);
-
-  return {
-    left: `${left}px`,
-    top: `${SUBTASK_BAR_TOP + layout.height + 2}px`,
-    width: `${Math.max(1, width)}px`,
-    height: `${linkTop(parent, linkIndex, layout.height) - SUBTASK_BAR_TOP - layout.height - 2}px`,
-  };
+function linkedItemColor(parent: GanttSubtask) {
+  return lightenColor(parent.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR, 0.28);
 }
 
 function shouldHideDraggedSourceSubtask(task: GanttTask, subtask: GanttSubtask) {
@@ -1863,22 +1905,15 @@ function subtaskGroupHeight(subtask: GanttSubtask, subtaskHeight: number) {
     return subtaskHeight;
   }
 
-  const linkHeights = subtask.links.map((link) => renderedSubtaskHeight(link, renderedSubtaskWidth(link)));
-  const linksHeight =
-    LINK_CONNECTOR_HEIGHT +
-    LINK_ROW_GAP +
-    linkHeights.reduce((total, height) => total + height, 0) +
-    LINK_ROW_GAP * Math.max(0, linkHeights.length - 1);
+  const linkHeight = Math.max(
+    ...subtask.links.map((link) => renderedSubtaskHeight(link, renderedSubtaskWidth(link))),
+  );
 
-  return subtaskHeight + linksHeight;
+  return subtaskHeight + LINK_ROW_GAP + linkHeight;
 }
 
-function linkTop(parent: GanttSubtask, linkIndex: number, parentHeight: number) {
-  const previousHeights = parent.links
-    .slice(0, linkIndex)
-    .reduce((total, link) => total + renderedSubtaskHeight(link, renderedSubtaskWidth(link)) + LINK_ROW_GAP, 0);
-
-  return SUBTASK_BAR_TOP + parentHeight + LINK_CONNECTOR_HEIGHT + LINK_ROW_GAP + previousHeights;
+function linkTop(_parent: GanttSubtask, parentHeight: number) {
+  return SUBTASK_BAR_TOP + parentHeight + LINK_ROW_GAP;
 }
 
 function subtaskLayout(task: GanttTask, target: GanttSubtask) {
@@ -2541,9 +2576,8 @@ function isEditableTarget(target: EventTarget | null) {
                     </div>
 
                     <template v-if="row.type === 'task' && !shouldHideDraggedSourceSubtask(row.task, subtask)">
-                      <template v-for="(link, linkIndex) in subtask.links" :key="link.id">
-                        <div class="link-connector" :style="linkConnectorStyle(row.task, subtask, link, linkIndex)"></div>
-                        <div class="subtask-meta link-meta" :style="linkMetaStyle(row.task, subtask, linkIndex)">
+                      <template v-for="link in subtask.links" :key="link.id">
+                        <div class="subtask-meta link-meta" :style="linkMetaStyle(row.task, subtask, link)">
                           <button
                             type="button"
                             class="fold-button"
@@ -2589,7 +2623,7 @@ function isEditableTarget(target: EventTarget | null) {
                             expanded: isSubtaskExpandedVisible(link),
                             editing: editingSubtaskId === link.id,
                           }"
-                          :style="linkBarStyle(row.task, subtask, link, linkIndex)"
+                          :style="linkBarStyle(row.task, subtask, link)"
                           :title="`${row.task.name} / ${subtask.name} / ${link.name}: ${link.start} - ${endDate(link)}`"
                           @click.stop="selectLink(row.task, subtask, link)"
                           @dblclick.stop="startLinkTextEdit(row.task, subtask, link)"
@@ -2778,7 +2812,7 @@ function isEditableTarget(target: EventTarget | null) {
       @click.stop
     >
       <button v-if="contextMenu.linkId" type="button" @click="deleteLinkFromContext">删除关联项</button>
-      <button v-else-if="contextMenu.subtaskId" type="button" @click="addLinkFromContext">添加关联项</button>
+      <button v-else-if="contextMenu.subtaskId && canAddLinkFromContext()" type="button" @click="addLinkFromContext">添加关联项</button>
       <button v-else type="button" @click="addSubtaskFromContext">添加子任务</button>
       <button v-if="!contextMenu.linkId && contextMenu.subtaskId" type="button" @click="deleteSubtaskFromContext">
         删除子任务
@@ -3521,8 +3555,8 @@ button.primary {
   z-index: 6;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 22px;
+  gap: 4px;
+  height: 20px;
   pointer-events: none;
 }
 
@@ -3530,33 +3564,13 @@ button.primary {
   z-index: 6;
 }
 
-.link-connector {
-  position: absolute;
-  z-index: 2;
-  border-right: 2px solid rgba(123, 133, 148, 0.42);
-  border-bottom: 2px solid rgba(123, 133, 148, 0.42);
-  pointer-events: none;
-}
-
-.link-connector::after {
-  content: "";
-  position: absolute;
-  right: -5px;
-  bottom: -6px;
-  width: 8px;
-  height: 8px;
-  border-right: 2px solid rgba(123, 133, 148, 0.62);
-  border-bottom: 2px solid rgba(123, 133, 148, 0.62);
-  transform: rotate(45deg);
-}
-
 .fold-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 24px;
-  width: 24px;
-  height: 22px;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -3629,8 +3643,8 @@ button.primary {
 }
 
 .primary-completion-checkbox {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
 }
 
 .secondary-completion-checkbox {
@@ -3659,14 +3673,14 @@ button.primary {
 .duration-label {
   display: inline-flex;
   align-items: center;
-  height: 22px;
+  height: 20px;
   flex: 0 0 auto;
   border: 1px solid #75a85e;
   border-radius: 6px;
-  padding: 0 7px;
+  padding: 0 6px;
   background: #ffffff;
   color: #24303d;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 650;
   line-height: 1;
   box-shadow: 0 1px 1px rgba(22, 35, 52, 0.06);

@@ -842,7 +842,7 @@ function normalizeLinkedItem(
     name: typeof item.name === "string" && item.name ? sanitizeLine(item.name) : `关联项 ${index + 1}`,
     start,
     duration: Math.min(duration, maxDuration),
-    color: typeof item.color === "string" && item.color ? item.color : parent.color || fallbackColor || DEFAULT_SUBTASK_COLOR,
+    color: parent.color || fallbackColor || DEFAULT_SUBTASK_COLOR,
     completed: item.completed === true,
     expanded: Array.isArray(item.children) && item.children.length > 0 && item.expanded === true,
     children: readSecondLevelSubtasks(item.children),
