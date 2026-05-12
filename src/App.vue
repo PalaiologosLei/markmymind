@@ -2118,6 +2118,15 @@ function isEditableTarget(target: EventTarget | null) {
                         <ChevronDown v-if="subtask.expanded && subtask.children.length" :size="16" />
                         <ChevronRight v-else :size="16" />
                       </button>
+                      <input
+                        class="completion-checkbox primary-completion-checkbox"
+                        type="checkbox"
+                        :checked="subtask.completed"
+                        aria-label="标记一级子任务完成"
+                        @change="setSubtaskCompleted(subtask, $event)"
+                        @click.stop
+                        @pointerdown.stop
+                      />
                       <span v-if="subtask.duration >= 3" class="duration-label">
                         {{ subtask.duration }} 天
                       </span>
@@ -2141,6 +2150,7 @@ function isEditableTarget(target: EventTarget | null) {
                       :class="{
                         locked: row.task.locked,
                         selected: subtask.id === selectedSubtaskId,
+                        completed: subtask.completed,
                         expanded: isSubtaskExpandedVisible(subtask),
                         editing: editingSubtaskId === subtask.id,
                         'puzzle-out-right': hasPuzzleOut(row.task, subtask),
@@ -2170,15 +2180,6 @@ function isEditableTarget(target: EventTarget | null) {
                       <span v-else-if="isSubtaskExpandedVisible(subtask)" class="expanded-subtask-lines">
                         <span class="task-name-line primary-line" :class="{ completed: subtask.completed }">
                           <span class="task-name-text">{{ subtask.name }}</span>
-                          <input
-                            class="completion-checkbox"
-                            type="checkbox"
-                            :checked="subtask.completed"
-                            aria-label="标记一级子任务完成"
-                            @change="setSubtaskCompleted(subtask, $event)"
-                            @click.stop
-                            @pointerdown.stop
-                          />
                         </span>
                         <span
                           v-for="child in subtask.children"
@@ -2186,9 +2187,8 @@ function isEditableTarget(target: EventTarget | null) {
                           class="task-name-line secondary-line"
                           :class="{ completed: child.completed }"
                         >
-                          <span class="task-name-text">{{ child.name }}</span>
                           <input
-                            class="completion-checkbox"
+                            class="completion-checkbox secondary-completion-checkbox"
                             type="checkbox"
                             :checked="child.completed"
                             aria-label="标记二级子任务完成"
@@ -2196,19 +2196,11 @@ function isEditableTarget(target: EventTarget | null) {
                             @click.stop
                             @pointerdown.stop
                           />
+                          <span class="task-name-text">{{ child.name }}</span>
                         </span>
                       </span>
                       <span v-else class="task-name-line primary-line" :class="{ completed: subtask.completed }">
                         <span class="task-name-text">{{ subtask.name }}</span>
-                        <input
-                          class="completion-checkbox"
-                          type="checkbox"
-                          :checked="subtask.completed"
-                          aria-label="标记一级子任务完成"
-                          @change="setSubtaskCompleted(subtask, $event)"
-                          @click.stop
-                          @pointerdown.stop
-                        />
                       </span>
                       <i
                         v-if="editingSubtaskId !== subtask.id"
@@ -3045,6 +3037,15 @@ button.primary {
   z-index: 5;
 }
 
+.subtask-bar.completed {
+  opacity: 0.62;
+}
+
+.subtask-bar.completed:hover,
+.subtask-bar.completed.selected {
+  opacity: 0.72;
+}
+
 .subtask-bar.expanded {
   align-items: flex-start;
   padding-top: 6px;
@@ -3155,6 +3156,22 @@ button.primary {
   transition: opacity 0.12s ease;
 }
 
+.primary-completion-checkbox,
+.secondary-completion-checkbox {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.primary-completion-checkbox {
+  width: 22px;
+  height: 22px;
+}
+
+.secondary-completion-checkbox {
+  width: 16px;
+  height: 16px;
+}
+
 .task-name-line:hover .completion-checkbox,
 .completion-checkbox:focus-visible {
   opacity: 1;
@@ -3171,16 +3188,6 @@ button.primary {
 .secondary-line {
   opacity: 0.88;
   font-weight: 600;
-}
-
-.secondary-line::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.95;
 }
 
 .duration-label {
