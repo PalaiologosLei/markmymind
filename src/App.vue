@@ -147,6 +147,14 @@ interface SubtaskLayout {
   height: number;
 }
 
+interface TaskLayoutSnapshot {
+  layouts: Map<string, SubtaskLayout>;
+  linkHeights: Map<string, number>;
+  rowHeight: number;
+  puzzleIn: Set<string>;
+  puzzleOut: Set<string>;
+}
+
 interface UnitSegment {
   key: string;
   label: string;
@@ -414,6 +422,17 @@ const subtaskDropPreview = computed(() => {
       fontSize: `${appSettings.value.collapsedBarFontSize}px`,
     },
   };
+});
+const taskLayoutSnapshots = computed(() => {
+  const snapshots = new Map<string, TaskLayoutSnapshot>();
+
+  taskListRows.value.forEach((row) => {
+    if (row.type === "task") {
+      snapshots.set(row.task.id, buildTaskLayoutSnapshot(row.task));
+    }
+  });
+
+  return snapshots;
 });
 
 const renderRange = computed(() =>
@@ -1993,7 +2012,9 @@ function applyRecurrenceDialog() {
   }
 
   const baseIndex = task.subtasks.length;
-  const copies = starts.map((start, index) => cloneSubtaskForStart(task, source, start, baseIndex + index));
+  const copies = starts.map((start, index) =>
+    cloneSubtaskForStart(task, source, start, baseIndex + index, { preserveExpanded: false }),
+  );
   task.subtasks.push(...copies);
   selectSubtask(task, copies[copies.length - 1]);
   statusMessage.value = `已生成 ${copies.length} 个重复子任务`;
@@ -2119,28 +2140,43 @@ function recurringStarts(
 
 function recurrenceConflict(task: GanttTask, source: GanttSubtask, starts: string[]) {
   const duration = normalizeDuration(source.duration);
-  const copies = starts.map((start) => ({ start, duration, name: source.name }));
+  const intervals = [
+    ...task.subtasks.map((subtask) => intervalForSubtask(subtask, false)),
+    ...starts.map((start) => intervalForSubtask({ start, duration, name: source.name }, true)),
+  ].sort((first, second) => first.start.localeCompare(second.start) || first.end.localeCompare(second.end));
 
-  for (let index = 0; index < copies.length; index += 1) {
-    for (let nextIndex = index + 1; nextIndex < copies.length; nextIndex += 1) {
-      if (subtaskIntervalsOverlap(copies[index], copies[nextIndex])) {
-        return `重复生成失败：${subtaskRangeLabel(copies[index])} 与 ${subtaskRangeLabel(copies[nextIndex])} 相互重叠。`;
+  let active = intervals[0];
+
+  for (let index = 1; index < intervals.length; index += 1) {
+    const current = intervals[index];
+
+    if (active.end > current.start && (active.copy || current.copy)) {
+      if (active.copy && current.copy) {
+        return `重复生成失败：${intervalRangeLabel(active)} 与 ${intervalRangeLabel(current)} 相互重叠。`;
       }
+
+      const copy = active.copy ? active : current;
+      const existing = active.copy ? current : active;
+
+      return `重复生成失败：${intervalRangeLabel(copy)} 与已有子任务“${existing.name}”重叠。`;
     }
-  }
 
-  for (const copy of copies) {
-    const existing = task.subtasks.find((subtask) => subtaskIntervalsOverlap(copy, subtask));
-
-    if (existing) {
-      return `重复生成失败：${subtaskRangeLabel(copy)} 与已有子任务“${existing.name}”重叠。`;
+    if (current.end > active.end) {
+      active = current;
     }
   }
 
   return "";
 }
 
-function cloneSubtaskForStart(task: GanttTask, source: GanttSubtask, start: string, index: number): GanttSubtask {
+function cloneSubtaskForStart(
+  task: GanttTask,
+  source: GanttSubtask,
+  start: string,
+  index: number,
+  options: { preserveExpanded?: boolean } = {},
+): GanttSubtask {
+  const preserveExpanded = options.preserveExpanded !== false;
   const subtask = createSubtask(
     doc.value.tasks.indexOf(task) + 1,
     index + 1,
@@ -2150,7 +2186,7 @@ function cloneSubtaskForStart(task: GanttTask, source: GanttSubtask, start: stri
   );
   subtask.duration = normalizeDuration(source.duration);
   subtask.completed = source.completed;
-  subtask.expanded = source.children.length > 0 && source.expanded;
+  subtask.expanded = preserveExpanded && source.children.length > 0 && source.expanded;
   subtask.children = source.children.map((child, childIndex) => ({
     id: createSecondLevelId(subtask.id, childIndex),
     name: child.name,
@@ -2162,6 +2198,7 @@ function cloneSubtaskForStart(task: GanttTask, source: GanttSubtask, start: stri
     id: createLinkId(subtask.id, linkIndex),
     start: clampLinkStart(subtask, link, addDays(link.start, offsetDays)),
     color: linkedItemColor(subtask),
+    expanded: preserveExpanded && link.children.length > 0 && link.expanded,
     children: link.children.map((child, childIndex) => ({
       id: createSecondLevelId(`${subtask.id}-link-${linkIndex + 1}`, childIndex),
       name: child.name,
@@ -2172,15 +2209,18 @@ function cloneSubtaskForStart(task: GanttTask, source: GanttSubtask, start: stri
   return subtask;
 }
 
-function subtaskIntervalsOverlap(
-  first: Pick<GanttSubtask, "start" | "duration">,
-  second: Pick<GanttSubtask, "start" | "duration">,
-) {
-  return first.start < endDate(second) && second.start < endDate(first);
+function intervalForSubtask(item: Pick<GanttSubtask, "start" | "duration"> & { name: string }, copy: boolean) {
+  return {
+    start: item.start,
+    end: endDate(item),
+    duration: normalizeDuration(item.duration),
+    name: item.name,
+    copy,
+  };
 }
 
-function subtaskRangeLabel(item: Pick<GanttSubtask, "start" | "duration">) {
-  return `${formatDisplayDate(item.start)} 至 ${formatDisplayDate(addDays(endDate(item), -1))}`;
+function intervalRangeLabel(item: ReturnType<typeof intervalForSubtask>) {
+  return `${formatDisplayDate(item.start)} 至 ${formatDisplayDate(addDays(item.end, -1))}`;
 }
 
 function uniqueSortedDates(values: string[]) {
@@ -2289,12 +2329,13 @@ function linkBarStyle(task: GanttTask, parent: GanttSubtask, link: GanttLinkedIt
   const layout = subtaskLayout(task, parent);
   const top = linkTop(parent, layout.height);
   const color = linkedItemColor(parent);
+  const height = linkLayoutHeight(task, link);
 
   return {
     left: `${dateToX(link.start)}px`,
     top: `${top}px`,
     width: `${renderedSubtaskWidth(link)}px`,
-    height: `${renderedSubtaskHeight(link, renderedSubtaskWidth(link))}px`,
+    height: `${height}px`,
     background: color,
     color: readableTextColor(color),
     "--bar-color": color,
@@ -2349,25 +2390,7 @@ function taskListRowHeight(row: TaskListRow) {
 }
 
 function taskRowHeight(task: GanttTask) {
-  return Math.max(
-    TASK_ROW_HEIGHT,
-    ...task.subtasks.map((subtask) => {
-      const layout = subtaskLayout(task, subtask);
-      return subtaskGroupHeight(subtask, layout.height) + SUBTASK_BAR_TOP + SUBTASK_ROW_BOTTOM;
-    }),
-  );
-}
-
-function subtaskGroupHeight(subtask: GanttSubtask, subtaskHeight: number) {
-  if (!subtask.links.length) {
-    return subtaskHeight;
-  }
-
-  const linkHeight = Math.max(
-    ...subtask.links.map((link) => renderedSubtaskHeight(link, renderedSubtaskWidth(link))),
-  );
-
-  return subtaskHeight + LINK_ROW_GAP + linkHeight;
+  return taskLayoutSnapshot(task).rowHeight;
 }
 
 function linkTop(_parent: GanttSubtask, parentHeight: number) {
@@ -2375,16 +2398,56 @@ function linkTop(_parent: GanttSubtask, parentHeight: number) {
 }
 
 function subtaskLayout(task: GanttTask, target: GanttSubtask) {
-  const layouts = subtaskLayouts(task);
-  return layouts.get(target.id) ?? {
+  return taskLayoutSnapshot(task).layouts.get(target.id) ?? {
     left: dateToX(target.start),
     width: baseSubtaskWidth(target),
     height: appSettings.value.collapsedBarHeight,
   };
 }
 
-function subtaskLayouts(task: GanttTask) {
-  return buildSubtaskLayouts(task.subtasks);
+function linkLayoutHeight(task: GanttTask, link: GanttLinkedItem) {
+  return taskLayoutSnapshot(task).linkHeights.get(link.id) ?? renderedSubtaskHeight(link, renderedSubtaskWidth(link));
+}
+
+function taskLayoutSnapshot(task: GanttTask) {
+  return taskLayoutSnapshots.value.get(task.id) ?? buildTaskLayoutSnapshot(task);
+}
+
+function buildTaskLayoutSnapshot(task: GanttTask): TaskLayoutSnapshot {
+  const layouts = buildSubtaskLayouts(task.subtasks);
+  const linkHeights = new Map<string, number>();
+  const puzzleSets = buildPuzzleConnectionSets(task);
+  let rowHeight = TASK_ROW_HEIGHT;
+
+  task.subtasks.forEach((subtask) => {
+    const layout = layouts.get(subtask.id) ?? {
+      left: dateToX(subtask.start),
+      width: baseSubtaskWidth(subtask),
+      height: appSettings.value.collapsedBarHeight,
+    };
+    let groupHeight = layout.height;
+
+    if (subtask.links.length) {
+      const tallestLink = Math.max(
+        ...subtask.links.map((link) => {
+          const height = renderedSubtaskHeight(link, renderedSubtaskWidth(link));
+          linkHeights.set(link.id, height);
+          return height;
+        }),
+      );
+      groupHeight += LINK_ROW_GAP + tallestLink;
+    }
+
+    rowHeight = Math.max(rowHeight, groupHeight + SUBTASK_BAR_TOP + SUBTASK_ROW_BOTTOM);
+  });
+
+  return {
+    layouts,
+    linkHeights,
+    rowHeight,
+    puzzleIn: puzzleSets.in,
+    puzzleOut: puzzleSets.out,
+  };
 }
 
 function buildSubtaskLayouts(subtasks: GanttSubtask[]) {
@@ -2414,15 +2477,34 @@ function buildSubtaskLayouts(subtasks: GanttSubtask[]) {
 }
 
 function hasPuzzleOut(task: GanttTask, subtask: GanttSubtask) {
-  const ordered = orderedSubtasksForPuzzle(task);
-  const index = ordered.findIndex((item) => item.id === subtask.id);
-  return index >= 0 && index < ordered.length - 1 && isPuzzleConnection(subtask, ordered[index + 1]);
+  return taskLayoutSnapshot(task).puzzleOut.has(subtask.id);
 }
 
 function hasPuzzleIn(task: GanttTask, subtask: GanttSubtask) {
+  return taskLayoutSnapshot(task).puzzleIn.has(subtask.id);
+}
+
+function buildPuzzleConnectionSets(task: GanttTask) {
+  const puzzleIn = new Set<string>();
+  const puzzleOut = new Set<string>();
+
+  if (!canRenderPuzzleConnections()) {
+    return { in: puzzleIn, out: puzzleOut };
+  }
+
   const ordered = orderedSubtasksForPuzzle(task);
-  const index = ordered.findIndex((item) => item.id === subtask.id);
-  return index > 0 && isPuzzleConnection(ordered[index - 1], subtask);
+
+  for (let index = 0; index < ordered.length - 1; index += 1) {
+    const left = ordered[index];
+    const right = ordered[index + 1];
+
+    if (isPuzzleConnection(left, right)) {
+      puzzleOut.add(left.id);
+      puzzleIn.add(right.id);
+    }
+  }
+
+  return { in: puzzleIn, out: puzzleOut };
 }
 
 function orderedSubtasksForPuzzle(task: GanttTask) {
