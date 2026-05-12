@@ -49,6 +49,7 @@ import {
 
 type DragMode = "move" | "resize";
 type DragItemKind = "subtask" | "link";
+type RecurrenceMode = "interval" | "weekly" | "monthly" | "yearly";
 
 interface DragState {
   kind: DragItemKind;
@@ -96,6 +97,20 @@ interface WeekNumberMenuState {
   x: number;
   y: number;
   weekStart: string;
+}
+
+interface RecurrenceDialogState {
+  taskId: string;
+  subtaskId: string;
+  mode: RecurrenceMode;
+  intervalDays: number;
+  untilDate: string;
+  weeklyDays: number[];
+  monthlyDay: number;
+  untilMonth: string;
+  yearlyDatesText: string;
+  untilYear: number;
+  message: string;
 }
 
 type TaskListRow =
@@ -231,6 +246,7 @@ const panState = ref<PanState | null>(null);
 const contextMenu = ref<ContextMenuState | null>(null);
 const taskListMenu = ref<TaskListMenuState | null>(null);
 const weekNumberMenu = ref<WeekNumberMenuState | null>(null);
+const recurrenceDialog = ref<RecurrenceDialogState | null>(null);
 const taskListDrag = ref<TaskListDragState | null>(null);
 const taskListDropTarget = ref<TaskListDropTarget | null>(null);
 const taskTablePane = ref<HTMLElement | null>(null);
@@ -250,6 +266,15 @@ const scaleOptions: Array<{ value: GanttScale; label: string }> = [
   { value: "month", label: "月" },
   { value: "quarter", label: "季" },
   { value: "year", label: "年" },
+];
+const weekdayOptions = [
+  { value: 1, label: "周一" },
+  { value: 2, label: "周二" },
+  { value: 3, label: "周三" },
+  { value: 4, label: "周四" },
+  { value: 5, label: "周五" },
+  { value: 6, label: "周六" },
+  { value: 0, label: "周日" },
 ];
 
 const sourceText = computed(() => serializeGanttDocument(doc.value));
@@ -818,32 +843,7 @@ function pasteCopiedSubtask() {
     return;
   }
 
-  const subtask = createSubtask(
-    doc.value.tasks.indexOf(targetTask) + 1,
-    targetTask.subtasks.length + 1,
-    source.name,
-    endDate(source),
-    source.color || targetTask.color || appSettings.value.defaultSubtaskColor,
-  );
-  subtask.duration = normalizeDuration(source.duration);
-  subtask.completed = source.completed;
-  subtask.expanded = source.children.length > 0 && source.expanded;
-  subtask.children = source.children.map((child, index) => ({
-    id: createSecondLevelId(subtask.id, index),
-    name: child.name,
-    completed: child.completed,
-  }));
-  const pastedOffsetDays = differenceInDays(source.start, subtask.start);
-  subtask.links = source.links.map((link, index) => ({
-    ...link,
-    id: createLinkId(subtask.id, index),
-    start: clampLinkStart(subtask, link, addDays(link.start, pastedOffsetDays)),
-    children: link.children.map((child, childIndex) => ({
-      id: createSecondLevelId(`${subtask.id}-link-${index + 1}`, childIndex),
-      name: child.name,
-      completed: child.completed,
-    })),
-  }));
+  const subtask = cloneSubtaskForStart(targetTask, source, endDate(source), targetTask.subtasks.length);
   targetTask.subtasks.push(subtask);
   selectSubtask(targetTask, subtask);
   statusMessage.value = `已粘贴子任务 ${subtask.name}`;
@@ -1914,6 +1914,324 @@ function deleteLinkFromContext() {
   selectSubtask(task, subtask);
   statusMessage.value = `已删除关联项 ${link.name}`;
   closeContextMenu();
+}
+
+function openRecurrenceDialogFromContext() {
+  const task = contextTask();
+  const subtask = contextSubtask();
+
+  if (!task || !subtask || contextMenu.value?.linkId) {
+    closeContextMenu();
+    return;
+  }
+
+  const startDate = parseIso(subtask.start);
+  const startYear = startDate.getUTCFullYear();
+  const startMonth = String(startDate.getUTCMonth() + 1).padStart(2, "0");
+  const startDay = startDate.getUTCDate();
+  recurrenceDialog.value = {
+    taskId: task.id,
+    subtaskId: subtask.id,
+    mode: "interval",
+    intervalDays: Math.max(1, normalizeDuration(subtask.duration)),
+    untilDate: addDays(subtask.start, Math.max(7, normalizeDuration(subtask.duration) * 4)),
+    weeklyDays: [startDate.getUTCDay()],
+    monthlyDay: startDay,
+    untilMonth: addMonths(subtask.start, 12).slice(0, 7),
+    yearlyDatesText: `${startMonth}-${String(startDay).padStart(2, "0")}`,
+    untilYear: startYear + 1,
+    message: "",
+  };
+  closeContextMenu();
+}
+
+function closeRecurrenceDialog() {
+  recurrenceDialog.value = null;
+}
+
+function toggleRecurrenceWeekday(day: number) {
+  const dialog = recurrenceDialog.value;
+
+  if (!dialog) {
+    return;
+  }
+
+  dialog.weeklyDays = dialog.weeklyDays.includes(day)
+    ? dialog.weeklyDays.filter((item) => item !== day)
+    : [...dialog.weeklyDays, day].sort((first, second) => first - second);
+}
+
+function applyRecurrenceDialog() {
+  const dialog = recurrenceDialog.value;
+  const task = dialog ? doc.value.tasks.find((item) => item.id === dialog.taskId) : null;
+  const source = task?.subtasks.find((item) => item.id === dialog?.subtaskId);
+
+  if (!dialog || !task || !source) {
+    recurrenceDialog.value = null;
+    return;
+  }
+
+  const startsResult = recurringStarts(dialog, source);
+
+  if (!startsResult.ok) {
+    dialog.message = startsResult.message;
+    return;
+  }
+
+  const starts = uniqueSortedDates(startsResult.starts);
+
+  if (!starts.length) {
+    dialog.message = "没有符合条件的重复日期。";
+    return;
+  }
+
+  const conflict = recurrenceConflict(task, source, starts);
+
+  if (conflict) {
+    dialog.message = conflict;
+    return;
+  }
+
+  const baseIndex = task.subtasks.length;
+  const copies = starts.map((start, index) => cloneSubtaskForStart(task, source, start, baseIndex + index));
+  task.subtasks.push(...copies);
+  selectSubtask(task, copies[copies.length - 1]);
+  statusMessage.value = `已生成 ${copies.length} 个重复子任务`;
+  recurrenceDialog.value = null;
+}
+
+function recurringStarts(
+  dialog: RecurrenceDialogState,
+  source: GanttSubtask,
+): { ok: true; starts: string[] } | { ok: false; message: string } {
+  if (dialog.mode === "interval") {
+    const interval = Math.round(Number(dialog.intervalDays));
+
+    if (interval < 1) {
+      return { ok: false, message: "重复间隔必须大于等于 1 天。" };
+    }
+
+    if (!isIsoDateInput(dialog.untilDate)) {
+      return { ok: false, message: "请指定有效的截止日期。" };
+    }
+
+    const starts: string[] = [];
+    let cursor = addDays(source.start, interval);
+
+    while (cursor <= dialog.untilDate) {
+      starts.push(cursor);
+      cursor = addDays(cursor, interval);
+    }
+
+    return { ok: true, starts };
+  }
+
+  if (dialog.mode === "weekly") {
+    if (!dialog.weeklyDays.length) {
+      return { ok: false, message: "请至少选择一个星期。" };
+    }
+
+    if (!isIsoDateInput(dialog.untilDate)) {
+      return { ok: false, message: "请指定有效的截止日期。" };
+    }
+
+    const selectedDays = new Set(dialog.weeklyDays);
+    const starts: string[] = [];
+    let cursor = addDays(source.start, 1);
+
+    while (cursor <= dialog.untilDate) {
+      if (selectedDays.has(parseIso(cursor).getUTCDay())) {
+        starts.push(cursor);
+      }
+
+      cursor = addDays(cursor, 1);
+    }
+
+    return { ok: true, starts };
+  }
+
+  if (dialog.mode === "monthly") {
+    const day = Math.round(Number(dialog.monthlyDay));
+    const until = parseMonthInput(dialog.untilMonth);
+
+    if (day < 1 || day > 31) {
+      return { ok: false, message: "每月日期必须在 1 到 31 之间。" };
+    }
+
+    if (!until) {
+      return { ok: false, message: "请指定有效的截止月份。" };
+    }
+
+    const start = parseIso(source.start);
+    let year = start.getUTCFullYear();
+    let month = start.getUTCMonth() + 1;
+    const starts: string[] = [];
+
+    while (year < until.year || (year === until.year && month <= until.month)) {
+      if (day <= daysInMonth(year, month)) {
+        const candidate = isoFromParts(year, month, day);
+
+        if (candidate > source.start) {
+          starts.push(candidate);
+        }
+      }
+
+      month += 1;
+      if (month > 12) {
+        month = 1;
+        year += 1;
+      }
+    }
+
+    return { ok: true, starts };
+  }
+
+  const dates = parseYearlyDateList(dialog.yearlyDatesText);
+  const untilYear = Math.round(Number(dialog.untilYear));
+
+  if (!dates.length) {
+    return { ok: false, message: "请至少输入一个有效日期，例如 05-12、10-01。" };
+  }
+
+  if (untilYear < parseIso(source.start).getUTCFullYear()) {
+    return { ok: false, message: "截止年份不能早于子任务开始年份。" };
+  }
+
+  const startYear = parseIso(source.start).getUTCFullYear();
+  const starts: string[] = [];
+
+  for (let year = startYear; year <= untilYear; year += 1) {
+    dates.forEach((date) => {
+      if (date.day > daysInMonth(year, date.month)) {
+        return;
+      }
+
+      const candidate = isoFromParts(year, date.month, date.day);
+
+      if (candidate > source.start) {
+        starts.push(candidate);
+      }
+    });
+  }
+
+  return { ok: true, starts };
+}
+
+function recurrenceConflict(task: GanttTask, source: GanttSubtask, starts: string[]) {
+  const duration = normalizeDuration(source.duration);
+  const copies = starts.map((start) => ({ start, duration, name: source.name }));
+
+  for (let index = 0; index < copies.length; index += 1) {
+    for (let nextIndex = index + 1; nextIndex < copies.length; nextIndex += 1) {
+      if (subtaskIntervalsOverlap(copies[index], copies[nextIndex])) {
+        return `重复生成失败：${subtaskRangeLabel(copies[index])} 与 ${subtaskRangeLabel(copies[nextIndex])} 相互重叠。`;
+      }
+    }
+  }
+
+  for (const copy of copies) {
+    const existing = task.subtasks.find((subtask) => subtaskIntervalsOverlap(copy, subtask));
+
+    if (existing) {
+      return `重复生成失败：${subtaskRangeLabel(copy)} 与已有子任务“${existing.name}”重叠。`;
+    }
+  }
+
+  return "";
+}
+
+function cloneSubtaskForStart(task: GanttTask, source: GanttSubtask, start: string, index: number): GanttSubtask {
+  const subtask = createSubtask(
+    doc.value.tasks.indexOf(task) + 1,
+    index + 1,
+    source.name,
+    start,
+    source.color || task.color || appSettings.value.defaultSubtaskColor,
+  );
+  subtask.duration = normalizeDuration(source.duration);
+  subtask.completed = source.completed;
+  subtask.expanded = source.children.length > 0 && source.expanded;
+  subtask.children = source.children.map((child, childIndex) => ({
+    id: createSecondLevelId(subtask.id, childIndex),
+    name: child.name,
+    completed: child.completed,
+  }));
+  const offsetDays = differenceInDays(source.start, subtask.start);
+  subtask.links = source.links.map((link, linkIndex) => ({
+    ...link,
+    id: createLinkId(subtask.id, linkIndex),
+    start: clampLinkStart(subtask, link, addDays(link.start, offsetDays)),
+    color: linkedItemColor(subtask),
+    children: link.children.map((child, childIndex) => ({
+      id: createSecondLevelId(`${subtask.id}-link-${linkIndex + 1}`, childIndex),
+      name: child.name,
+      completed: child.completed,
+    })),
+  }));
+
+  return subtask;
+}
+
+function subtaskIntervalsOverlap(
+  first: Pick<GanttSubtask, "start" | "duration">,
+  second: Pick<GanttSubtask, "start" | "duration">,
+) {
+  return first.start < endDate(second) && second.start < endDate(first);
+}
+
+function subtaskRangeLabel(item: Pick<GanttSubtask, "start" | "duration">) {
+  return `${formatDisplayDate(item.start)} 至 ${formatDisplayDate(addDays(endDate(item), -1))}`;
+}
+
+function uniqueSortedDates(values: string[]) {
+  return Array.from(new Set(values)).sort();
+}
+
+function isIsoDateInput(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function parseMonthInput(value: string) {
+  const match = value.match(/^(\d{4})-(\d{2})$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+
+  return month >= 1 && month <= 12 ? { year, month } : null;
+}
+
+function parseYearlyDateList(value: string) {
+  return value
+    .split(/[\s,，、;；]+/)
+    .map((raw) => {
+      const match = raw.trim().match(/^(\d{1,2})[-/](\d{1,2})$/);
+
+      if (!match) {
+        return null;
+      }
+
+      const month = Number(match[1]);
+      const day = Number(match[2]);
+
+      if (month < 1 || month > 12 || day < 1 || day > daysInMonth(2024, month)) {
+        return null;
+      }
+
+      return { month, day };
+    })
+    .filter((item): item is { month: number; day: number } => Boolean(item));
+}
+
+function daysInMonth(year: number, month: number) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function isoFromParts(year: number, month: number, day: number) {
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 function contextTask() {
@@ -3255,6 +3573,9 @@ function isEditableTarget(target: EventTarget | null) {
       <button v-if="contextMenu.linkId" type="button" @click="deleteLinkFromContext">删除关联项</button>
       <button v-else-if="contextMenu.subtaskId && canAddLinkFromContext()" type="button" @click="addLinkFromContext">添加关联项</button>
       <button v-else type="button" @click="addSubtaskFromContext">添加子任务</button>
+      <button v-if="!contextMenu.linkId && contextMenu.subtaskId" type="button" @click="openRecurrenceDialogFromContext">
+        重复生成
+      </button>
       <button v-if="!contextMenu.linkId && contextMenu.subtaskId" type="button" @click="deleteSubtaskFromContext">
         删除子任务
       </button>
@@ -3279,6 +3600,82 @@ function isEditableTarget(target: EventTarget | null) {
       @click.stop
     >
       <button type="button" @click="applyWeekNumberAnchor">设为第 1 周</button>
+    </div>
+
+    <div v-if="recurrenceDialog" class="modal-backdrop" @click.self="closeRecurrenceDialog">
+      <form class="recurrence-dialog" @submit.prevent="applyRecurrenceDialog" @click.stop>
+        <header>
+          <strong>重复生成</strong>
+          <button type="button" title="关闭" @click="closeRecurrenceDialog">×</button>
+        </header>
+
+        <label class="settings-row">
+          <span>重复方式</span>
+          <select v-model="recurrenceDialog.mode">
+            <option value="interval">每 N 天</option>
+            <option value="weekly">每周</option>
+            <option value="monthly">每月</option>
+            <option value="yearly">每年</option>
+          </select>
+        </label>
+
+        <template v-if="recurrenceDialog.mode === 'interval'">
+          <label class="settings-row">
+            <span>间隔天数</span>
+            <input v-model.number="recurrenceDialog.intervalDays" type="number" min="1" max="366" step="1" />
+          </label>
+          <label class="settings-row">
+            <span>截止日期</span>
+            <input v-model="recurrenceDialog.untilDate" type="date" />
+          </label>
+        </template>
+
+        <template v-else-if="recurrenceDialog.mode === 'weekly'">
+          <div class="recurrence-weekdays">
+            <label v-for="day in weekdayOptions" :key="day.value">
+              <input
+                type="checkbox"
+                :checked="recurrenceDialog.weeklyDays.includes(day.value)"
+                @change="toggleRecurrenceWeekday(day.value)"
+              />
+              <span>{{ day.label }}</span>
+            </label>
+          </div>
+          <label class="settings-row">
+            <span>截止日期</span>
+            <input v-model="recurrenceDialog.untilDate" type="date" />
+          </label>
+        </template>
+
+        <template v-else-if="recurrenceDialog.mode === 'monthly'">
+          <label class="settings-row">
+            <span>每月日期</span>
+            <input v-model.number="recurrenceDialog.monthlyDay" type="number" min="1" max="31" step="1" />
+          </label>
+          <label class="settings-row">
+            <span>截止月份</span>
+            <input v-model="recurrenceDialog.untilMonth" type="month" />
+          </label>
+        </template>
+
+        <template v-else>
+          <label class="settings-row">
+            <span>重复日期</span>
+            <input v-model="recurrenceDialog.yearlyDatesText" type="text" placeholder="05-12, 10-01" />
+          </label>
+          <label class="settings-row">
+            <span>截止年份</span>
+            <input v-model.number="recurrenceDialog.untilYear" type="number" min="1970" max="2100" step="1" />
+          </label>
+        </template>
+
+        <p v-if="recurrenceDialog.message" class="recurrence-message">{{ recurrenceDialog.message }}</p>
+
+        <footer>
+          <button type="button" @click="closeRecurrenceDialog">取消</button>
+          <button type="submit" class="primary">生成</button>
+        </footer>
+      </form>
     </div>
   </main>
 </template>
@@ -4388,8 +4785,7 @@ button.primary {
   font-size: 13px;
 }
 
-.settings-row input[type="number"],
-.settings-row input[type="color"],
+.settings-row input,
 .settings-row select {
   width: 100%;
   height: 30px;
@@ -4399,7 +4795,7 @@ button.primary {
   color: #27313d;
 }
 
-.settings-row input[type="number"],
+.settings-row input,
 .settings-row select {
   padding: 0 8px;
 }
@@ -4444,6 +4840,90 @@ button.primary {
 
 .task-list-menu {
   width: 160px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  background: rgba(23, 32, 45, 0.28);
+}
+
+.recurrence-dialog {
+  display: grid;
+  width: min(430px, calc(100vw - 40px));
+  gap: 14px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 16px;
+  background: #ffffff;
+  box-shadow: 0 18px 56px rgba(20, 31, 48, 0.24);
+}
+
+.recurrence-dialog header,
+.recurrence-dialog footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recurrence-dialog header strong {
+  color: #1f2b3a;
+  font-size: 16px;
+}
+
+.recurrence-dialog header button {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0;
+  background: transparent;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.recurrence-dialog footer {
+  justify-content: flex-end;
+}
+
+.recurrence-dialog footer button {
+  min-width: 72px;
+}
+
+.recurrence-weekdays {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.recurrence-weekdays label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #465364;
+  font-size: 13px;
+}
+
+.recurrence-weekdays input {
+  width: 16px;
+  height: 16px;
+  accent-color: #2f6fed;
+}
+
+.recurrence-message {
+  margin: 0;
+  border: 1px solid #ffd9a8;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fff7e8;
+  color: #8a4a00;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 @media (max-width: 1180px) {
