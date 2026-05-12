@@ -469,7 +469,7 @@ export function createTask(
   sectionId: string,
   index: number,
   start = todayIso(),
-  name = `新任务 ${index}`,
+  name = "新任务",
   subtaskNames: string[] = [],
 ): GanttTask {
   const color = DEFAULT_TASK_COLOR;
@@ -489,7 +489,7 @@ export function createTask(
 export function createSubtask(
   taskIndex: number,
   subtaskIndex: number,
-  name = `子任务 ${subtaskIndex}`,
+  name = "子任务",
   start = todayIso(),
   color = DEFAULT_SUBTASK_COLOR,
 ): GanttSubtask {
@@ -506,7 +506,7 @@ export function createSubtask(
   };
 }
 
-export function createSection(index: number, name = `新分组 ${index}`): GanttSection {
+export function createSection(index: number, name = "新分组"): GanttSection {
   return {
     id: `section-${Date.now().toString(36)}-${index}`,
     name,
@@ -619,7 +619,7 @@ function parseSubtaskLine(
     return null;
   }
 
-  const name = sanitizeLine(line.slice(0, colonIndex).trim() || `子任务 ${fallbackIndex}`);
+  const name = sanitizeLine(line.slice(0, colonIndex).trim() || "子任务");
   const tokens = splitTokens(line.slice(colonIndex + 1));
 
   if (tokens[0]?.toLowerCase() !== "subtask") {
@@ -839,7 +839,7 @@ function normalizeLinkedItem(
 
   return {
     id: typeof item.id === "string" && item.id ? item.id : `${parent.id}-link-${index + 1}`,
-    name: typeof item.name === "string" && item.name ? sanitizeLine(item.name) : `关联项 ${index + 1}`,
+    name: typeof item.name === "string" && item.name ? sanitizeLine(item.name) : "关联项",
     start,
     duration: Math.min(duration, maxDuration),
     color: parent.color || fallbackColor || DEFAULT_SUBTASK_COLOR,

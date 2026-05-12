@@ -64,7 +64,9 @@ interface DragState {
 
 interface PanState {
   startX: number;
+  startY: number;
   startScrollLeft: number;
+  startScrollTop: number;
 }
 
 interface ContextMenuState {
@@ -139,6 +141,10 @@ interface AppSettings {
   autoSwitchViewOnExpand: boolean;
   showPuzzleJoins: boolean;
   restoreLastFile: boolean;
+  collapsedBarHeight: number;
+  collapsedBarFontSize: number;
+  gridLineWidth: number;
+  gridLineColor: string;
 }
 
 const TASK_ROW_HEIGHT = 82;
@@ -165,6 +171,10 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   autoSwitchViewOnExpand: true,
   showPuzzleJoins: true,
   restoreLastFile: true,
+  collapsedBarHeight: 30,
+  collapsedBarFontSize: 13,
+  gridLineWidth: 1,
+  gridLineColor: "#edf1f5",
 };
 
 const doc = ref<GanttDocument>(createSampleDocument());
@@ -334,6 +344,8 @@ const subtaskDropPreview = computed(() => {
       background: previewColor,
       color: readableTextColor(previewColor),
       "--bar-color": previewColor,
+      "--bar-height": `${appSettings.value.collapsedBarHeight}px`,
+      fontSize: `${appSettings.value.collapsedBarFontSize}px`,
     },
   };
 });
@@ -343,6 +355,10 @@ const renderRange = computed(() =>
 );
 const visibleStart = computed(() => renderRange.value.start);
 const visibleDayCount = computed(() => renderRange.value.days);
+const timelinePaneStyle = computed(() => ({
+  "--grid-line-width": `${appSettings.value.gridLineWidth}px`,
+  "--grid-line-color": appSettings.value.gridLineColor,
+}));
 
 const dayWidth = computed(() => {
   if (doc.value.view === "day") {
@@ -1034,7 +1050,9 @@ function beginTimelinePan(event: PointerEvent) {
   contextMenu.value = null;
   panState.value = {
     startX: event.clientX,
+    startY: event.clientY,
     startScrollLeft: pane.scrollLeft,
+    startScrollTop: pane.scrollTop,
   };
   pane.classList.add("panning");
   window.addEventListener("pointermove", updateTimelinePan);
@@ -1050,6 +1068,8 @@ function updateTimelinePan(event: PointerEvent) {
   }
 
   pane.scrollLeft = pan.startScrollLeft - (event.clientX - pan.startX);
+  pane.scrollTop = pan.startScrollTop - (event.clientY - pan.startY);
+  syncTimelineScroll();
 }
 
 function endTimelinePan() {
@@ -1703,7 +1723,7 @@ function addSubtaskFromContext() {
   const subtask = createSubtask(
     doc.value.tasks.indexOf(task) + 1,
     task.subtasks.length + 1,
-    `子任务 ${task.subtasks.length + 1}`,
+    "子任务",
     start,
     task.color || appSettings.value.defaultSubtaskColor,
   );
@@ -1722,7 +1742,6 @@ function addLinkFromContext() {
     return;
   }
 
-  const linkIndex = subtask.links.length + 1;
   const start = firstAvailableLinkStart(subtask, contextMenu.value?.date ?? subtask.start, 1);
 
   if (!start) {
@@ -1733,7 +1752,7 @@ function addLinkFromContext() {
 
   const link: GanttLinkedItem = {
     id: createLinkId(subtask.id, subtask.links.length),
-    name: `关联项 ${linkIndex}`,
+    name: "关联项",
     start,
     duration: 1,
     color: linkedItemColor(subtask),
@@ -1826,6 +1845,8 @@ function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
     background: color,
     color: readableTextColor(color),
     "--bar-color": color,
+    "--bar-height": `${appSettings.value.collapsedBarHeight}px`,
+    fontSize: `${appSettings.value.collapsedBarFontSize}px`,
   };
 }
 
@@ -1842,6 +1863,8 @@ function linkBarStyle(task: GanttTask, parent: GanttSubtask, link: GanttLinkedIt
     background: color,
     color: readableTextColor(color),
     "--bar-color": color,
+    "--bar-height": `${appSettings.value.collapsedBarHeight}px`,
+    fontSize: `${appSettings.value.collapsedBarFontSize}px`,
   };
 }
 
@@ -1921,7 +1944,7 @@ function subtaskLayout(task: GanttTask, target: GanttSubtask) {
   return layouts.get(target.id) ?? {
     left: dateToX(target.start),
     width: baseSubtaskWidth(target),
-    height: 30,
+    height: appSettings.value.collapsedBarHeight,
   };
 }
 
@@ -2045,11 +2068,11 @@ function renderedSubtaskHeight(subtask: GanttSubtask | GanttLinkedItem, width: n
   }
 
   if (!isSubtaskExpandedVisible(subtask)) {
-    return 30;
+    return appSettings.value.collapsedBarHeight;
   }
 
   const lineCount = expandedSubtaskLines(subtask).reduce((total, line) => total + wrappedLineCount(line, width - 58), 0);
-  return Math.max(34, EXPANDED_VERTICAL_PADDING + lineCount * EXPANDED_LINE_HEIGHT);
+  return Math.max(appSettings.value.collapsedBarHeight + 4, EXPANDED_VERTICAL_PADDING + lineCount * EXPANDED_LINE_HEIGHT);
 }
 
 function expandedSubtaskLines(subtask: GanttSubtask | GanttLinkedItem) {
@@ -2248,6 +2271,20 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     autoSwitchViewOnExpand: value.autoSwitchViewOnExpand !== false,
     showPuzzleJoins: value.showPuzzleJoins !== false,
     restoreLastFile: value.restoreLastFile !== false,
+    collapsedBarHeight: clampSettingNumber(
+      value.collapsedBarHeight,
+      22,
+      64,
+      DEFAULT_APP_SETTINGS.collapsedBarHeight,
+    ),
+    collapsedBarFontSize: clampSettingNumber(
+      value.collapsedBarFontSize,
+      10,
+      24,
+      DEFAULT_APP_SETTINGS.collapsedBarFontSize,
+    ),
+    gridLineWidth: clampSettingNumber(value.gridLineWidth, 0, 4, DEFAULT_APP_SETTINGS.gridLineWidth),
+    gridLineColor: normalizeColor(value.gridLineColor, DEFAULT_APP_SETTINGS.gridLineColor),
   };
 }
 
@@ -2420,6 +2457,7 @@ function isEditableTarget(target: EventTarget | null) {
           <section
             ref="timelinePane"
             class="timeline-pane"
+            :style="timelinePaneStyle"
             aria-label="甘特图时间轴"
             @scroll="syncTimelineScroll"
             @pointerdown="beginTimelinePan"
@@ -2771,6 +2809,30 @@ function isEditableTarget(target: EventTarget | null) {
             <label class="settings-row">
               <span>年视图单日宽度</span>
               <input v-model.number="appSettings.yearScaleWidth" type="number" min="1" max="12" step="0.1" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>任务条</h3>
+            <label class="settings-row">
+              <span>折叠任务条高度</span>
+              <input v-model.number="appSettings.collapsedBarHeight" type="number" min="22" max="64" step="1" />
+            </label>
+            <label class="settings-row">
+              <span>折叠任务条字号</span>
+              <input v-model.number="appSettings.collapsedBarFontSize" type="number" min="10" max="24" step="1" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>日期网格</h3>
+            <label class="settings-row">
+              <span>网格线粗细</span>
+              <input v-model.number="appSettings.gridLineWidth" type="number" min="0" max="4" step="0.5" />
+            </label>
+            <label class="settings-row">
+              <span>网格线颜色</span>
+              <input v-model="appSettings.gridLineColor" type="color" />
             </label>
           </section>
 
@@ -3279,6 +3341,8 @@ button.primary {
 }
 
 .timeline-pane {
+  --grid-line-width: 1px;
+  --grid-line-color: #edf1f5;
   min-width: 0;
   overflow: auto;
   background: #ffffff;
@@ -3306,13 +3370,13 @@ button.primary {
 .year-row {
   top: 0;
   height: 38px;
-  border-bottom: 1px solid #edf1f5;
+  border-bottom: var(--grid-line-width) solid var(--grid-line-color);
 }
 
 .unit-row {
   top: 38px;
   height: 38px;
-  border-bottom: 1px solid #dbe1ea;
+  border-bottom: var(--grid-line-width) solid var(--grid-line-color);
 }
 
 .year-segment,
@@ -3322,7 +3386,7 @@ button.primary {
   justify-content: center;
   flex: 0 0 auto;
   overflow: hidden;
-  border-right: 1px solid #edf1f5;
+  border-right: var(--grid-line-width) solid var(--grid-line-color);
   color: #68727f;
   white-space: nowrap;
 }
@@ -3344,7 +3408,7 @@ button.primary {
 .timeline-row {
   position: relative;
   display: flex;
-  border-bottom: 1px solid #edf1f5;
+  border-bottom: var(--grid-line-width) solid var(--grid-line-color);
   overflow: hidden;
   --row-bg: #ffffff;
 }
@@ -3404,7 +3468,7 @@ button.primary {
 .grid-unit {
   flex: 0 0 auto;
   height: 100%;
-  border-right: 1px solid #edf1f5;
+  border-right: var(--grid-line-width) solid var(--grid-line-color);
 }
 
 .today-line {
@@ -3420,12 +3484,13 @@ button.primary {
 .subtask-bar {
   position: absolute;
   --puzzle-radius: 8px;
+  --bar-height: 30px;
   z-index: 3;
   display: flex;
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
-  height: 30px;
+  height: var(--bar-height);
   min-width: 34px;
   overflow: visible;
   border: 0;
@@ -3471,7 +3536,7 @@ button.primary {
 .subtask-bar.puzzle-out-right::after {
   content: "";
   position: absolute;
-  top: calc((30px - var(--puzzle-radius) * 2) / 2);
+  top: calc((var(--bar-height) - var(--puzzle-radius) * 2) / 2);
   right: calc(var(--puzzle-radius) * -0.72);
   width: calc(var(--puzzle-radius) * 2);
   height: calc(var(--puzzle-radius) * 2);
@@ -3483,14 +3548,14 @@ button.primary {
 
 .subtask-bar.puzzle-in-left {
   -webkit-mask-image: radial-gradient(
-    circle var(--puzzle-radius) at 0 15px,
+    circle var(--puzzle-radius) at 0 calc(var(--bar-height) / 2),
     transparent 0 calc(var(--puzzle-radius) - 0.5px),
     #000 var(--puzzle-radius)
   );
   -webkit-mask-repeat: no-repeat;
   -webkit-mask-size: 100% 100%;
   mask-image: radial-gradient(
-    circle var(--puzzle-radius) at 0 15px,
+    circle var(--puzzle-radius) at 0 calc(var(--bar-height) / 2),
     transparent 0 calc(var(--puzzle-radius) - 0.5px),
     #000 var(--puzzle-radius)
   );
