@@ -142,9 +142,11 @@ export function startOfWeek(iso: string): string {
   return formatIso(date);
 }
 
-export function renderRangeAroundToday() {
-  const start = startOfYear(addYears(todayIso(), -RANGE_YEARS_BEFORE));
-  const end = addYears(startOfYear(todayIso()), RANGE_YEARS_AFTER + 1);
+export function renderRangeAroundToday(yearsBefore = RANGE_YEARS_BEFORE, yearsAfter = RANGE_YEARS_AFTER) {
+  const before = Math.max(0, Math.round(yearsBefore));
+  const after = Math.max(0, Math.round(yearsAfter));
+  const start = startOfYear(addYears(todayIso(), -before));
+  const end = addYears(startOfYear(todayIso()), after + 1);
 
   return {
     start,

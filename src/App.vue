@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -16,6 +16,7 @@ import {
   LocateFixed,
   Plus,
   Save,
+  Settings,
   Trash2,
   Unlock,
 } from "lucide-vue-next";
@@ -119,6 +120,21 @@ interface UnitSegment {
   days: number;
 }
 
+interface AppSettings {
+  defaultTaskColor: string;
+  defaultSubtaskColor: string;
+  dayScaleWidth: number;
+  weekScaleWidth: number;
+  monthScaleWidth: number;
+  quarterScaleWidth: number;
+  yearScaleWidth: number;
+  rangeYearsBefore: number;
+  rangeYearsAfter: number;
+  autoSwitchViewOnExpand: boolean;
+  showPuzzleJoins: boolean;
+  restoreLastFile: boolean;
+}
+
 const TASK_ROW_HEIGHT = 82;
 const SECTION_ROW_HEIGHT = 44;
 const SUBTASK_BAR_TOP = 38;
@@ -127,9 +143,25 @@ const SUBTASK_ROW_BOTTOM = 12;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
+const APP_SETTINGS_KEY = "markmymind:settings";
 const DEFAULT_BAR_COLOR = "#9ac7ff";
+const DEFAULT_APP_SETTINGS: AppSettings = {
+  defaultTaskColor: "#9ac7ff",
+  defaultSubtaskColor: "#9ac7ff",
+  dayScaleWidth: 220,
+  weekScaleWidth: 96,
+  monthScaleWidth: 54,
+  quarterScaleWidth: 14,
+  yearScaleWidth: 2.7,
+  rangeYearsBefore: 5,
+  rangeYearsAfter: 5,
+  autoSwitchViewOnExpand: true,
+  showPuzzleJoins: true,
+  restoreLastFile: true,
+};
 
 const doc = ref<GanttDocument>(createSampleDocument());
+const appSettings = ref<AppSettings>(loadAppSettings());
 const currentPath = ref<string | null>(null);
 const lastSavedSource = ref(serializeGanttDocument(doc.value));
 const selectedTaskId = ref(doc.value.tasks[0]?.id ?? "");
@@ -137,6 +169,7 @@ const selectedSubtaskId = ref(doc.value.tasks[0]?.subtasks[0]?.id ?? "");
 const statusMessage = ref("已创建新甘特图");
 const warnings = ref<string[]>([]);
 const sourcePanelOpen = ref(false);
+const settingsPanelOpen = ref(false);
 const sourceDraft = ref("");
 const dragState = ref<DragState | null>(null);
 const subtaskDropTargetId = ref<string | null>(null);
@@ -163,6 +196,7 @@ const scaleOptions: Array<{ value: GanttScale; label: string }> = [
 
 const sourceText = computed(() => serializeGanttDocument(doc.value));
 const isDirty = computed(() => sourceText.value !== lastSavedSource.value);
+const sidePanelOpen = computed(() => sourcePanelOpen.value || settingsPanelOpen.value);
 const sectionById = computed(() => new Map(doc.value.sections.map((section) => [section.id, section])));
 const taskListRows = computed<TaskListRow[]>(() => {
   const rows: TaskListRow[] = [];
@@ -232,28 +266,30 @@ const selectedSubtask = computed(() => {
   return task.subtasks.find((subtask) => subtask.id === selectedSubtaskId.value) ?? task.subtasks[0] ?? null;
 });
 
-const renderRange = computed(() => renderRangeAroundToday());
+const renderRange = computed(() =>
+  renderRangeAroundToday(appSettings.value.rangeYearsBefore, appSettings.value.rangeYearsAfter),
+);
 const visibleStart = computed(() => renderRange.value.start);
 const visibleDayCount = computed(() => renderRange.value.days);
 
 const dayWidth = computed(() => {
   if (doc.value.view === "day") {
-    return 220;
+    return appSettings.value.dayScaleWidth;
   }
 
   if (doc.value.view === "week") {
-    return 96;
+    return appSettings.value.weekScaleWidth;
   }
 
   if (doc.value.view === "month") {
-    return 54;
+    return appSettings.value.monthScaleWidth;
   }
 
   if (doc.value.view === "quarter") {
-    return 14;
+    return appSettings.value.quarterScaleWidth;
   }
 
-  return 2.7;
+  return appSettings.value.yearScaleWidth;
 });
 
 const timelineWidth = computed(() => Math.ceil(visibleDayCount.value * dayWidth.value));
@@ -317,10 +353,25 @@ const todayLineStyle = computed(() => {
   };
 });
 
+watch(
+  appSettings,
+  (value) => {
+    const normalized = normalizeSettings(value);
+
+    if (JSON.stringify(normalized) !== JSON.stringify(value)) {
+      appSettings.value = normalized;
+      return;
+    }
+
+    window.localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(normalized));
+  },
+  { deep: true },
+);
+
 onMounted(async () => {
   window.addEventListener("keydown", handleGlobalKeydown);
 
-  const restored = await restoreLastOpenedFile();
+  const restored = appSettings.value.restoreLastFile ? await restoreLastOpenedFile() : false;
   await nextTick();
 
   if (!restored) {
@@ -424,6 +475,7 @@ async function saveDocumentAs() {
 
 function addTask(sectionId = "") {
   const task = createTask(sectionId, doc.value.tasks.length + 1, todayIso());
+  task.color = appSettings.value.defaultTaskColor;
   insertTaskIntoSection(task, sectionId, tasksInSection(sectionId).length);
 
   if (!sectionId) {
@@ -563,7 +615,7 @@ function pasteCopiedSubtask() {
     targetTask.subtasks.length + 1,
     source.name,
     endDate(source),
-    source.color || targetTask.color,
+    source.color || targetTask.color || appSettings.value.defaultSubtaskColor,
   );
   subtask.duration = normalizeDuration(source.duration);
   subtask.completed = source.completed;
@@ -821,6 +873,7 @@ function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubt
 
 function startSubtaskTextEdit(task: GanttTask, subtask: GanttSubtask) {
   selectSubtask(task, subtask);
+  ensureSubtaskInteractionScale(subtask);
   if (subtask.children.length > 0) {
     subtask.expanded = true;
   }
@@ -906,13 +959,21 @@ function toggleSubtaskExpanded(task: GanttTask, subtask: GanttSubtask) {
     return;
   }
 
+  ensureSubtaskInteractionScale(subtask);
+  subtask.expanded = true;
+}
+
+function ensureSubtaskInteractionScale(subtask: GanttSubtask) {
+  if (!appSettings.value.autoSwitchViewOnExpand) {
+    return;
+  }
+
   const targetScale = expansionScaleForSubtask(subtask);
+
   if (doc.value.view !== targetScale) {
     doc.value.view = targetScale;
     nextTick(() => scrollToDate(subtask.start, 0.35));
   }
-
-  subtask.expanded = true;
 }
 
 function expansionScaleForSubtask(subtask: GanttSubtask): GanttScale {
@@ -1008,6 +1069,7 @@ function addTaskFromListMenu() {
   }
 
   const task = createTask(anchorTask.sectionId, doc.value.tasks.length + 1, todayIso());
+  task.color = appSettings.value.defaultTaskColor;
   const siblingIndex = tasksInSection(anchorTask.sectionId).findIndex((item) => item.id === anchorTask.id);
   insertTaskIntoSection(task, anchorTask.sectionId, siblingIndex + 1);
 
@@ -1357,7 +1419,7 @@ function addSubtaskFromContext() {
     task.subtasks.length + 1,
     `子任务 ${task.subtasks.length + 1}`,
     start,
-    task.color,
+    task.color || appSettings.value.defaultSubtaskColor,
   );
   task.subtasks.push(subtask);
   selectSubtask(task, subtask);
@@ -1396,7 +1458,7 @@ function contextSubtask() {
 
 function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
   const layout = subtaskLayout(task, subtask);
-  const color = subtask.color || task.color || DEFAULT_BAR_COLOR;
+  const color = subtask.color || task.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR;
 
   return {
     left: `${layout.left}px`,
@@ -1501,7 +1563,10 @@ function isPuzzleConnection(left: GanttSubtask, right: GanttSubtask) {
 }
 
 function canRenderPuzzleConnections() {
-  return doc.value.view === "day" || doc.value.view === "week" || doc.value.view === "month";
+  return (
+    appSettings.value.showPuzzleJoins &&
+    (doc.value.view === "day" || doc.value.view === "week" || doc.value.view === "month")
+  );
 }
 
 function readableTextColor(color: string) {
@@ -1609,7 +1674,21 @@ function toggleTaskLock(task: GanttTask) {
 
 function toggleSourcePanel() {
   sourcePanelOpen.value = !sourcePanelOpen.value;
+  if (sourcePanelOpen.value) {
+    settingsPanelOpen.value = false;
+  }
   refreshSourceDraft();
+}
+
+function toggleSettingsPanel() {
+  settingsPanelOpen.value = !settingsPanelOpen.value;
+  if (settingsPanelOpen.value) {
+    sourcePanelOpen.value = false;
+  }
+}
+
+function resetSettings() {
+  appSettings.value = { ...DEFAULT_APP_SETTINGS };
 }
 
 function refreshSourceDraft() {
@@ -1719,6 +1798,46 @@ function safeFileName(value: string): string {
   );
 }
 
+function loadAppSettings(): AppSettings {
+  try {
+    const raw = window.localStorage.getItem(APP_SETTINGS_KEY);
+    return normalizeSettings(raw ? JSON.parse(raw) : {});
+  } catch {
+    return { ...DEFAULT_APP_SETTINGS };
+  }
+}
+
+function normalizeSettings(value: Partial<AppSettings>): AppSettings {
+  return {
+    defaultTaskColor: normalizeColor(value.defaultTaskColor, DEFAULT_APP_SETTINGS.defaultTaskColor),
+    defaultSubtaskColor: normalizeColor(value.defaultSubtaskColor, DEFAULT_APP_SETTINGS.defaultSubtaskColor),
+    dayScaleWidth: clampSettingNumber(value.dayScaleWidth, 120, 360, DEFAULT_APP_SETTINGS.dayScaleWidth),
+    weekScaleWidth: clampSettingNumber(value.weekScaleWidth, 48, 180, DEFAULT_APP_SETTINGS.weekScaleWidth),
+    monthScaleWidth: clampSettingNumber(value.monthScaleWidth, 24, 110, DEFAULT_APP_SETTINGS.monthScaleWidth),
+    quarterScaleWidth: clampSettingNumber(value.quarterScaleWidth, 6, 42, DEFAULT_APP_SETTINGS.quarterScaleWidth),
+    yearScaleWidth: clampSettingNumber(value.yearScaleWidth, 1, 12, DEFAULT_APP_SETTINGS.yearScaleWidth),
+    rangeYearsBefore: clampSettingNumber(value.rangeYearsBefore, 0, 20, DEFAULT_APP_SETTINGS.rangeYearsBefore),
+    rangeYearsAfter: clampSettingNumber(value.rangeYearsAfter, 0, 20, DEFAULT_APP_SETTINGS.rangeYearsAfter),
+    autoSwitchViewOnExpand: value.autoSwitchViewOnExpand !== false,
+    showPuzzleJoins: value.showPuzzleJoins !== false,
+    restoreLastFile: value.restoreLastFile !== false,
+  };
+}
+
+function normalizeColor(value: unknown, fallback: string) {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+}
+
+function clampSettingNumber(value: unknown, min: number, max: number, fallback: number) {
+  const numericValue = typeof value === "number" ? value : Number(value);
+
+  if (!Number.isFinite(numericValue)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, numericValue));
+}
+
 function isEditableTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -1753,6 +1872,10 @@ function isEditableTarget(target: EventTarget | null) {
           <Code2 :size="17" />
           <span>源码</span>
         </button>
+        <button type="button" title="设置" :class="{ active: settingsPanelOpen }" @click="toggleSettingsPanel">
+          <Settings :size="17" />
+          <span>设置</span>
+        </button>
       </div>
 
       <div class="file-state">
@@ -1761,7 +1884,7 @@ function isEditableTarget(target: EventTarget | null) {
       </div>
     </header>
 
-    <section class="workspace" :class="{ 'with-source': sourcePanelOpen }">
+    <section class="workspace" :class="{ 'with-source': sidePanelOpen }">
       <section class="gantt-surface">
         <div class="board-head">
           <div class="range-control">
@@ -2074,6 +2197,81 @@ function isEditableTarget(target: EventTarget | null) {
         <div class="source-notes">
           <span>{{ statusMessage }}</span>
           <span v-if="warnings.length">{{ warnings.length }} 条解析提醒</span>
+        </div>
+      </aside>
+
+      <aside v-else-if="settingsPanelOpen" class="source-panel settings-panel">
+        <div class="source-head">
+          <strong>设置</strong>
+          <div class="source-actions">
+            <button type="button" @click="resetSettings">重置</button>
+          </div>
+        </div>
+
+        <div class="settings-body">
+          <section class="settings-section">
+            <h3>默认颜色</h3>
+            <label class="settings-row">
+              <span>新任务默认子任务颜色</span>
+              <input v-model="appSettings.defaultTaskColor" type="color" />
+            </label>
+            <label class="settings-row">
+              <span>新子任务备用颜色</span>
+              <input v-model="appSettings.defaultSubtaskColor" type="color" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>时间刻度</h3>
+            <label class="settings-row">
+              <span>天视图单日宽度</span>
+              <input v-model.number="appSettings.dayScaleWidth" type="number" min="120" max="360" step="1" />
+            </label>
+            <label class="settings-row">
+              <span>周视图单日宽度</span>
+              <input v-model.number="appSettings.weekScaleWidth" type="number" min="48" max="180" step="1" />
+            </label>
+            <label class="settings-row">
+              <span>月视图单日宽度</span>
+              <input v-model.number="appSettings.monthScaleWidth" type="number" min="24" max="110" step="1" />
+            </label>
+            <label class="settings-row">
+              <span>季视图单日宽度</span>
+              <input v-model.number="appSettings.quarterScaleWidth" type="number" min="6" max="42" step="1" />
+            </label>
+            <label class="settings-row">
+              <span>年视图单日宽度</span>
+              <input v-model.number="appSettings.yearScaleWidth" type="number" min="1" max="12" step="0.1" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>渲染范围</h3>
+            <label class="settings-row">
+              <span>向过去渲染年份</span>
+              <input v-model.number="appSettings.rangeYearsBefore" type="number" min="0" max="20" step="1" />
+            </label>
+            <label class="settings-row">
+              <span>向未来渲染年份</span>
+              <input v-model.number="appSettings.rangeYearsAfter" type="number" min="0" max="20" step="1" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>交互</h3>
+            <label class="settings-toggle">
+              <input v-model="appSettings.autoSwitchViewOnExpand" type="checkbox" />
+              <span>展开或编辑时自动切换视图</span>
+            </label>
+            <label class="settings-toggle">
+              <input v-model="appSettings.showPuzzleJoins" type="checkbox" />
+              <span>显示相接子任务拼图效果</span>
+            </label>
+            <label class="settings-toggle">
+              <input v-model="appSettings.restoreLastFile" type="checkbox" />
+              <span>启动时打开上次文件</span>
+            </label>
+          </section>
         </div>
       </aside>
     </section>
@@ -3021,6 +3219,77 @@ button.primary {
   border-top: 1px solid #dbe1ea;
   color: #68727f;
   font-size: 12px;
+}
+
+.settings-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 14px;
+  background: #fbfcfe;
+}
+
+.settings-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px 0 16px;
+  border-bottom: 1px solid #e4e9f0;
+}
+
+.settings-section:first-child {
+  padding-top: 0;
+}
+
+.settings-section:last-child {
+  border-bottom: 0;
+}
+
+.settings-section h3 {
+  margin: 0;
+  color: #253142;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  align-items: center;
+  gap: 12px;
+  color: #465364;
+  font-size: 13px;
+}
+
+.settings-row input[type="number"],
+.settings-row input[type="color"] {
+  width: 100%;
+  height: 30px;
+  border: 1px solid #d8dee8;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #27313d;
+}
+
+.settings-row input[type="number"] {
+  padding: 0 8px;
+}
+
+.settings-row input[type="color"] {
+  padding: 2px;
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #465364;
+  font-size: 13px;
+}
+
+.settings-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: #2f6fed;
 }
 
 .context-menu {
