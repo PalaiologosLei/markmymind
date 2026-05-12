@@ -265,6 +265,45 @@ const selectedSubtask = computed(() => {
 
   return task.subtasks.find((subtask) => subtask.id === selectedSubtaskId.value) ?? task.subtasks[0] ?? null;
 });
+const subtaskDropPreview = computed(() => {
+  const drag = dragState.value;
+
+  if (!drag || drag.mode !== "move" || !subtaskDropTargetId.value) {
+    return null;
+  }
+
+  const sourceTask = doc.value.tasks.find((task) => task.id === drag.taskId);
+  const targetTask = doc.value.tasks.find((task) => task.id === subtaskDropTargetId.value);
+  const subtask = sourceTask?.subtasks.find((item) => item.id === drag.subtaskId);
+
+  if (!sourceTask || !targetTask || !subtask) {
+    return null;
+  }
+
+  const layouts = buildSubtaskLayouts([...targetTask.subtasks, subtask]);
+  const fallbackWidth = renderedSubtaskWidth(subtask);
+  const layout = layouts.get(subtask.id) ?? {
+    left: dateToX(subtask.start),
+    width: fallbackWidth,
+    height: renderedSubtaskHeight(subtask, fallbackWidth),
+  };
+  const color = subtask.color || targetTask.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR;
+  const previewColor = lightenColor(color, 0.46);
+
+  return {
+    targetTaskId: subtaskDropTargetId.value,
+    name: subtask.name,
+    style: {
+      left: `${layout.left}px`,
+      top: `${SUBTASK_BAR_TOP}px`,
+      width: `${layout.width}px`,
+      height: `${layout.height}px`,
+      background: previewColor,
+      color: readableTextColor(previewColor),
+      "--bar-color": previewColor,
+    },
+  };
+});
 
 const renderRange = computed(() =>
   renderRangeAroundToday(appSettings.value.rangeYearsBefore, appSettings.value.rangeYearsAfter),
@@ -855,6 +894,18 @@ function syncTimelineScroll() {
   requestAnimationFrame(() => {
     syncingVerticalScroll = false;
   });
+}
+
+function scrollTaskTableWheel(event: WheelEvent) {
+  const pane = timelinePane.value;
+
+  if (!pane) {
+    return;
+  }
+
+  pane.scrollTop += event.deltaY;
+  pane.scrollLeft += event.deltaX;
+  syncTimelineScroll();
 }
 
 function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubtask) {
@@ -1490,10 +1541,6 @@ function taskListRowHeight(row: TaskListRow) {
   return row.type === "section" ? SECTION_ROW_HEIGHT : taskRowHeight(row.task);
 }
 
-function taskNumber(task: GanttTask) {
-  return doc.value.tasks.findIndex((item) => item.id === task.id) + 1;
-}
-
 function taskRowHeight(task: GanttTask) {
   return Math.max(
     TASK_ROW_HEIGHT,
@@ -1514,10 +1561,14 @@ function subtaskLayout(task: GanttTask, target: GanttSubtask) {
 }
 
 function subtaskLayouts(task: GanttTask) {
+  return buildSubtaskLayouts(task.subtasks);
+}
+
+function buildSubtaskLayouts(subtasks: GanttSubtask[]) {
   const layouts = new Map<string, SubtaskLayout>();
-  const ordered = [...task.subtasks].sort((first, second) => {
+  const ordered = [...subtasks].sort((first, second) => {
     const dateOrder = first.start.localeCompare(second.start);
-    return dateOrder || task.subtasks.indexOf(first) - task.subtasks.indexOf(second);
+    return dateOrder || subtasks.indexOf(first) - subtasks.indexOf(second);
   });
   let cursor = Number.NEGATIVE_INFINITY;
   let previous: GanttSubtask | null = null;
@@ -1583,6 +1634,17 @@ function readableTextColor(color: string) {
   const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 
   return luminance > 0.48 ? "#1f2937" : "#ffffff";
+}
+
+function lightenColor(color: string, amount: number) {
+  const rgb = parseHexColor(color);
+
+  if (!rgb) {
+    return color;
+  }
+
+  const mixed = rgb.map((channel) => Math.round(channel + (255 - channel) * amount));
+  return `#${mixed.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function parseHexColor(color: string): [number, number, number] | null {
@@ -1911,7 +1973,13 @@ function isEditableTarget(target: EventTarget | null) {
         </div>
 
         <div class="gantt-board">
-          <aside ref="taskTablePane" class="task-table" @scroll="syncTaskTableScroll" @contextmenu.prevent="openTaskListBlankMenu">
+          <aside
+            ref="taskTablePane"
+            class="task-table"
+            @scroll="syncTaskTableScroll"
+            @wheel.prevent="scrollTaskTableWheel"
+            @contextmenu.prevent="openTaskListBlankMenu"
+          >
             <div class="task-header">
               <span class="index-cell"></span>
               <span>任务 / 分组</span>
@@ -1963,7 +2031,7 @@ function isEditableTarget(target: EventTarget | null) {
                   >
                     <GripVertical :size="15" />
                   </button>
-                  <span class="index-cell">{{ taskNumber(row.task) }}</span>
+                  <span class="task-indent" :class="{ nested: row.depth === 1 }"></span>
                   <input v-model="row.task.name" class="name-input main-name" aria-label="主任务名" />
                   <input
                     v-model="row.task.color"
@@ -2019,18 +2087,18 @@ function isEditableTarget(target: EventTarget | null) {
                   @contextmenu="row.type === 'task' && openContextMenu($event, row.task)"
                 >
                   <div class="today-line" :style="todayLineStyle"></div>
-                  <div
-                    v-for="segment in unitSegments"
-                    :key="`${row.key}-${segment.key}`"
-                    class="grid-unit"
-                    :style="segmentStyle(segment)"
-                  ></div>
+                  <div v-for="segment in unitSegments" :key="`${row.key}-${segment.key}`" class="grid-unit" :style="segmentStyle(segment)"></div>
+
+                  <div v-if="row.type === 'section'" class="section-timeline-label">
+                    {{ row.section.name }}
+                  </div>
 
                   <div
-                    v-if="row.type === 'section'"
-                    class="section-timeline-label"
+                    v-if="row.type === 'task' && subtaskDropPreview?.targetTaskId === row.task.id"
+                    class="subtask-drop-preview"
+                    :style="subtaskDropPreview.style"
                   >
-                    {{ row.section.name }}
+                    <span class="primary-line">{{ subtaskDropPreview.name }}</span>
                   </div>
 
                   <template v-for="subtask in row.type === 'task' ? row.task.subtasks : []" :key="subtask.id">
@@ -2523,7 +2591,7 @@ button.primary {
 
 .task-table {
   min-width: 0;
-  overflow: auto;
+  overflow: hidden;
   border-right: 1px solid #dbe1ea;
   background: #ffffff;
 }
@@ -2541,7 +2609,7 @@ button.primary {
 
 .task-row {
   position: relative;
-  grid-template-columns: 26px 48px minmax(0, 1fr) 34px;
+  grid-template-columns: 26px 30px minmax(0, 1fr) 34px;
 }
 
 .task-row.section-row {
@@ -2614,12 +2682,38 @@ button.primary {
 }
 
 .child-task-row .main-name {
-  padding-left: 14px;
+  padding-left: 18px;
 }
 
 .index-cell {
   color: #8b95a1;
   text-align: right;
+}
+
+.task-indent {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.task-indent.nested::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  width: 12px;
+  height: 1px;
+  background: #c5ced9;
+}
+
+.task-indent.nested::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  top: 8px;
+  bottom: 50%;
+  width: 1px;
+  background: #c5ced9;
 }
 
 .drag-handle,
@@ -2826,6 +2920,11 @@ button.primary {
   background: #fbfcfe;
 }
 
+.timeline-row.subtask-drop-target::after {
+  content: none;
+  display: none;
+}
+
 .section-timeline-label {
   position: sticky;
   left: 14px;
@@ -2875,6 +2974,31 @@ button.primary {
   box-shadow: 0 1px 2px rgba(22, 35, 52, 0.18);
   touch-action: none;
   cursor: grab;
+}
+
+.subtask-drop-preview {
+  position: absolute;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  overflow: hidden;
+  border: 2px solid rgba(47, 111, 237, 0.35);
+  border-radius: 7px;
+  padding: 0 24px 0 14px;
+  font-size: 13px;
+  font-weight: 750;
+  box-shadow: 0 1px 2px rgba(22, 35, 52, 0.08);
+  pointer-events: none;
+  opacity: 0.72;
+}
+
+.subtask-drop-preview .primary-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap !important;
 }
 
 .subtask-bar.puzzle-out-right {
@@ -3335,7 +3459,7 @@ button.primary {
   }
 
   .task-row {
-    grid-template-columns: 24px 40px minmax(0, 1fr) 32px;
+    grid-template-columns: 24px 28px minmax(0, 1fr) 32px;
   }
 
   .task-row.section-row {
