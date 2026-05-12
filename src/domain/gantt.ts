@@ -497,7 +497,7 @@ export function createSubtask(
     id: `subtask-${Date.now().toString(36)}-${taskIndex}-${subtaskIndex}`,
     name,
     start,
-    duration: 3,
+    duration: 1,
     color,
     completed: false,
     expanded: false,

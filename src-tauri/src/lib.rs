@@ -27,12 +27,24 @@ fn write_gantt_file(path: String, content: String) -> Result<(), String> {
     fs::write(&path, content).map_err(|err| format!("Failed to write file: {err}"))
 }
 
+#[tauri::command]
+fn rename_gantt_file(from: String, to: String) -> Result<(), String> {
+    let from = resolve_path(from)?;
+    let to = resolve_path(to)?;
+
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("Failed to create folder: {err}"))?;
+    }
+
+    fs::rename(&from, &to).map_err(|err| format!("Failed to rename file: {err}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![read_gantt_file, write_gantt_file])
+        .invoke_handler(tauri::generate_handler![read_gantt_file, write_gantt_file, rename_gantt_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
-  CalendarDays,
+  BookOpen,
   Check,
   ChevronDown,
   ChevronRight,
@@ -14,6 +14,7 @@ import {
   GripVertical,
   Lock,
   LocateFixed,
+  PaintBucket,
   Plus,
   Save,
   Settings,
@@ -34,6 +35,7 @@ import {
   parseIso,
   renderRangeAroundToday,
   serializeGanttDocument,
+  startOfWeek,
   taskStart,
   todayIso,
   type GanttDocument,
@@ -67,6 +69,10 @@ interface PanState {
   startY: number;
   startScrollLeft: number;
   startScrollTop: number;
+}
+
+interface WeekNumberSegment extends UnitSegment {
+  weekStart: string;
 }
 
 interface ContextMenuState {
@@ -145,6 +151,14 @@ interface AppSettings {
   collapsedBarFontSize: number;
   gridLineWidth: number;
   gridLineColor: string;
+  gridLineOpacity: number;
+  showWeekNumberAxis: boolean;
+  firstWeekStart: string;
+  workdayBackground: string;
+  weekendBackground: string;
+  workdayBackgroundEnabled: boolean;
+  weekendBackgroundEnabled: boolean;
+  defaultSubtaskDuration: number;
 }
 
 const TASK_ROW_HEIGHT = 82;
@@ -158,6 +172,7 @@ const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
 const APP_SETTINGS_KEY = "markmymind:settings";
 const DEFAULT_BAR_COLOR = "#9ac7ff";
+const TIMELINE_HEADER_ROW_HEIGHT = 38;
 const DEFAULT_APP_SETTINGS: AppSettings = {
   defaultTaskColor: "#9ac7ff",
   defaultSubtaskColor: "#9ac7ff",
@@ -175,6 +190,14 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   collapsedBarFontSize: 13,
   gridLineWidth: 1,
   gridLineColor: "#edf1f5",
+  gridLineOpacity: 1,
+  showWeekNumberAxis: true,
+  firstWeekStart: "2026-01-05",
+  workdayBackground: "#ffffff",
+  weekendBackground: "#f6f8fb",
+  workdayBackgroundEnabled: false,
+  weekendBackgroundEnabled: false,
+  defaultSubtaskDuration: 1,
 };
 
 const doc = ref<GanttDocument>(createSampleDocument());
@@ -202,6 +225,7 @@ const editingSubtaskText = ref("");
 const subtaskTextEditor = ref<HTMLTextAreaElement | null>(null);
 const copiedSubtask = ref<GanttSubtask | null>(null);
 let syncingVerticalScroll = false;
+let titleRenameTimer: ReturnType<typeof setTimeout> | null = null;
 
 const scaleOptions: Array<{ value: GanttScale; label: string }> = [
   { value: "day", label: "天" },
@@ -357,8 +381,20 @@ const visibleStart = computed(() => renderRange.value.start);
 const visibleDayCount = computed(() => renderRange.value.days);
 const timelinePaneStyle = computed(() => ({
   "--grid-line-width": `${appSettings.value.gridLineWidth}px`,
-  "--grid-line-color": appSettings.value.gridLineColor,
+  "--grid-line-color": colorWithOpacity(appSettings.value.gridLineColor, appSettings.value.gridLineOpacity),
 }));
+const weekNumberAxisVisible = computed(
+  () =>
+    appSettings.value.showWeekNumberAxis &&
+    (doc.value.view === "day" || doc.value.view === "week" || doc.value.view === "month"),
+);
+const timelineHeaderHeight = computed(
+  () => TIMELINE_HEADER_ROW_HEIGHT * (weekNumberAxisVisible.value ? 3 : 2),
+);
+const titleModel = computed({
+  get: () => doc.value.title,
+  set: (value: string) => updateDocumentTitle(value),
+});
 
 const dayWidth = computed(() => {
   if (doc.value.view === "day") {
@@ -429,6 +465,32 @@ const unitSegments = computed<UnitSegment[]>(() => {
   return segments;
 });
 
+const weekNumberSegments = computed<WeekNumberSegment[]>(() => {
+  const segments: WeekNumberSegment[] = [];
+  let cursor = startOfWeek(renderRange.value.start);
+  const firstWeekStart = startOfWeek(appSettings.value.firstWeekStart);
+
+  while (cursor < renderRange.value.end) {
+    const rawEnd = addDays(cursor, 7);
+    const start = cursor < renderRange.value.start ? renderRange.value.start : cursor;
+    const end = rawEnd > renderRange.value.end ? renderRange.value.end : rawEnd;
+    const weekIndex = Math.floor(differenceInDays(firstWeekStart, cursor) / 7) + 1;
+
+    segments.push({
+      key: `week-number-${cursor}`,
+      label: `${weekIndex}`,
+      start,
+      end,
+      days: differenceInDays(start, end),
+      weekStart: cursor,
+    });
+
+    cursor = rawEnd;
+  }
+
+  return segments;
+});
+
 const todayLineStyle = computed(() => {
   const offset = differenceInDays(visibleStart.value, todayIso());
 
@@ -469,6 +531,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleGlobalKeydown);
+  if (titleRenameTimer) {
+    window.clearTimeout(titleRenameTimer);
+  }
 });
 
 async function newDocument() {
@@ -508,10 +573,11 @@ async function loadDocumentFromPath(path: string) {
   const result = parseGanttSource(content);
 
   doc.value = result.doc;
+  setTitleFromPath(path);
   currentPath.value = path;
   selectTask(doc.value.tasks[0]);
   warnings.value = result.warnings;
-  lastSavedSource.value = content;
+  lastSavedSource.value = sourceText.value;
   refreshSourceDraft();
   statusMessage.value = `已打开 ${fileName(path)}`;
 }
@@ -558,6 +624,7 @@ async function saveDocumentAs() {
   }
 
   currentPath.value = target;
+  setTitleFromPath(target);
   await saveDocument();
 }
 
@@ -572,6 +639,16 @@ function addTask(sectionId = "") {
 
   selectTask(task);
   statusMessage.value = "已添加任务";
+}
+
+function applyTaskColorToSubtasks(task: GanttTask) {
+  task.subtasks.forEach((subtask) => {
+    subtask.color = task.color;
+    subtask.links.forEach((link) => {
+      link.color = linkedItemColor(subtask);
+    });
+  });
+  statusMessage.value = "已应用默认颜色";
 }
 
 function deleteSelectedTask() {
@@ -1015,7 +1092,7 @@ function taskFromTimelinePoint(clientX: number, clientY: number) {
     return null;
   }
 
-  let yInBody = clientY - rect.top + pane.scrollTop - 76;
+  let yInBody = clientY - rect.top + pane.scrollTop - timelineHeaderHeight.value;
 
   if (yInBody < 0) {
     return null;
@@ -1727,6 +1804,7 @@ function addSubtaskFromContext() {
     start,
     task.color || appSettings.value.defaultSubtaskColor,
   );
+  subtask.duration = normalizeDuration(appSettings.value.defaultSubtaskDuration);
   task.subtasks.push(subtask);
   selectSubtask(task, subtask);
   statusMessage.value = `已为 ${task.name} 添加子任务`;
@@ -2118,6 +2196,37 @@ function segmentStyle(segment: UnitSegment) {
   };
 }
 
+function timeCellStyle(segment: UnitSegment) {
+  return {
+    ...segmentStyle(segment),
+    background: cellBackground(segment),
+  };
+}
+
+function cellBackground(segment: UnitSegment) {
+  if (!(doc.value.view === "day" || doc.value.view === "week" || doc.value.view === "month")) {
+    return undefined;
+  }
+
+  const day = parseIso(segment.start).getUTCDay();
+  const isWeekend = day === 0 || day === 6;
+
+  if (isWeekend && appSettings.value.weekendBackgroundEnabled) {
+    return appSettings.value.weekendBackground;
+  }
+
+  if (!isWeekend && appSettings.value.workdayBackgroundEnabled) {
+    return appSettings.value.workdayBackground;
+  }
+
+  return undefined;
+}
+
+function setFirstWeekStart(weekStart: string) {
+  appSettings.value.firstWeekStart = startOfWeek(weekStart);
+  statusMessage.value = `已将 ${formatDisplayDate(appSettings.value.firstWeekStart)} 设为第 1 周`;
+}
+
 function toggleTaskLock(task: GanttTask) {
   task.locked = !task.locked;
 }
@@ -2239,6 +2348,26 @@ function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+function fileStem(path: string): string {
+  const name = fileName(path);
+  const dotIndex = name.lastIndexOf(".");
+
+  return dotIndex > 0 ? name.slice(0, dotIndex) : name;
+}
+
+function fileExtension(path: string): string {
+  const name = fileName(path);
+  const dotIndex = name.lastIndexOf(".");
+
+  return dotIndex > 0 ? name.slice(dotIndex) : ".mmd";
+}
+
+function directoryOf(path: string): string {
+  const index = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+
+  return index >= 0 ? path.slice(0, index + 1) : "";
+}
+
 function safeFileName(value: string): string {
   return (
     value
@@ -2246,6 +2375,49 @@ function safeFileName(value: string): string {
       .replace(/[\\/:*?"<>|]+/g, "-")
       .replace(/\s+/g, "-") || "markmymind-gantt"
   );
+}
+
+function setTitleFromPath(path: string) {
+  doc.value.title = fileStem(path) || doc.value.title;
+}
+
+function updateDocumentTitle(value: string) {
+  doc.value.title = value.trim() || "未命名甘特图";
+  scheduleTitleRename();
+}
+
+function scheduleTitleRename() {
+  if (titleRenameTimer) {
+    window.clearTimeout(titleRenameTimer);
+  }
+
+  titleRenameTimer = window.setTimeout(() => {
+    titleRenameTimer = null;
+    void renameCurrentFileToTitle();
+  }, 600);
+}
+
+async function renameCurrentFileToTitle() {
+  const path = currentPath.value;
+
+  if (!path) {
+    return;
+  }
+
+  const nextPath = `${directoryOf(path)}${safeFileName(doc.value.title)}${fileExtension(path)}`;
+
+  if (nextPath === path) {
+    return;
+  }
+
+  try {
+    await invoke("rename_gantt_file", { from: path, to: nextPath });
+    currentPath.value = nextPath;
+    window.localStorage.setItem(LAST_FILE_PATH_KEY, nextPath);
+    statusMessage.value = `已重命名为 ${fileName(nextPath)}`;
+  } catch (error) {
+    statusMessage.value = `重命名失败：${String(error)}`;
+  }
 }
 
 function loadAppSettings(): AppSettings {
@@ -2285,11 +2457,34 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     ),
     gridLineWidth: clampSettingNumber(value.gridLineWidth, 0, 4, DEFAULT_APP_SETTINGS.gridLineWidth),
     gridLineColor: normalizeColor(value.gridLineColor, DEFAULT_APP_SETTINGS.gridLineColor),
+    gridLineOpacity: clampSettingNumber(value.gridLineOpacity, 0, 1, DEFAULT_APP_SETTINGS.gridLineOpacity),
+    showWeekNumberAxis: value.showWeekNumberAxis !== false,
+    firstWeekStart: typeof value.firstWeekStart === "string" ? startOfWeek(value.firstWeekStart) : DEFAULT_APP_SETTINGS.firstWeekStart,
+    workdayBackground: normalizeColor(value.workdayBackground, DEFAULT_APP_SETTINGS.workdayBackground),
+    weekendBackground: normalizeColor(value.weekendBackground, DEFAULT_APP_SETTINGS.weekendBackground),
+    workdayBackgroundEnabled: value.workdayBackgroundEnabled === true,
+    weekendBackgroundEnabled: value.weekendBackgroundEnabled === true,
+    defaultSubtaskDuration: clampSettingNumber(
+      value.defaultSubtaskDuration,
+      1,
+      365,
+      DEFAULT_APP_SETTINGS.defaultSubtaskDuration,
+    ),
   };
 }
 
 function normalizeColor(value: unknown, fallback: string) {
   return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+}
+
+function colorWithOpacity(color: string, opacity: number) {
+  const rgb = parseHexColor(color);
+
+  if (!rgb) {
+    return color;
+  }
+
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${Math.max(0, Math.min(1, opacity))})`;
 }
 
 function clampSettingNumber(value: unknown, min: number, max: number, fallback: number) {
@@ -2315,8 +2510,8 @@ function isEditableTarget(target: EventTarget | null) {
   <main class="app-shell" @click="closeContextMenu">
     <header class="topbar">
       <div class="brand">
-        <CalendarDays :size="22" />
-        <input v-model="doc.title" class="title-input" aria-label="甘特图标题" />
+        <BookOpen :size="22" />
+        <input v-model="titleModel" class="title-input" aria-label="甘特图标题" />
       </div>
 
       <div class="toolbar">
@@ -2444,6 +2639,15 @@ function isEditableTarget(target: EventTarget | null) {
                     @click.stop
                     @pointerdown.stop
                   />
+                  <button
+                    type="button"
+                    class="apply-task-color"
+                    title="应用颜色"
+                    @click.stop="applyTaskColorToSubtasks(row.task)"
+                    @pointerdown.stop
+                  >
+                    <PaintBucket :size="15" />
+                  </button>
                 </template>
               </div>
             </div>
@@ -2457,6 +2661,7 @@ function isEditableTarget(target: EventTarget | null) {
           <section
             ref="timelinePane"
             class="timeline-pane"
+            :class="{ 'has-week-axis': weekNumberAxisVisible }"
             :style="timelinePaneStyle"
             aria-label="甘特图时间轴"
             @scroll="syncTimelineScroll"
@@ -2469,8 +2674,23 @@ function isEditableTarget(target: EventTarget | null) {
                 </div>
               </div>
 
+              <div v-if="weekNumberAxisVisible" class="week-number-row">
+                <button
+                  v-for="segment in weekNumberSegments"
+                  :key="segment.key"
+                  type="button"
+                  class="week-number-cell"
+                  :class="{ anchor: segment.weekStart === appSettings.firstWeekStart }"
+                  :style="segmentStyle(segment)"
+                  title="右键设为第 1 周"
+                  @contextmenu.prevent="setFirstWeekStart(segment.weekStart)"
+                >
+                  {{ segment.label }}
+                </button>
+              </div>
+
               <div class="unit-row">
-                <div v-for="segment in unitSegments" :key="segment.key" class="unit-cell" :style="segmentStyle(segment)">
+                <div v-for="segment in unitSegments" :key="segment.key" class="unit-cell" :style="timeCellStyle(segment)">
                   {{ segment.label }}
                 </div>
               </div>
@@ -2490,7 +2710,7 @@ function isEditableTarget(target: EventTarget | null) {
                   @contextmenu="row.type === 'task' && openContextMenu($event, row.task)"
                 >
                   <div class="today-line" :style="todayLineStyle"></div>
-                  <div v-for="segment in unitSegments" :key="`${row.key}-${segment.key}`" class="grid-unit" :style="segmentStyle(segment)"></div>
+                  <div v-for="segment in unitSegments" :key="`${row.key}-${segment.key}`" class="grid-unit" :style="timeCellStyle(segment)"></div>
 
                   <div v-if="row.type === 'section'" class="section-timeline-label">
                     {{ row.section.name }}
@@ -2786,6 +3006,10 @@ function isEditableTarget(target: EventTarget | null) {
               <span>新子任务备用颜色</span>
               <input v-model="appSettings.defaultSubtaskColor" type="color" />
             </label>
+            <label class="settings-row">
+              <span>新子任务默认天数</span>
+              <input v-model.number="appSettings.defaultSubtaskDuration" type="number" min="1" max="365" step="1" />
+            </label>
           </section>
 
           <section class="settings-section">
@@ -2831,8 +3055,36 @@ function isEditableTarget(target: EventTarget | null) {
               <input v-model.number="appSettings.gridLineWidth" type="number" min="0" max="4" step="0.5" />
             </label>
             <label class="settings-row">
+              <span>网格线透明度</span>
+              <input v-model.number="appSettings.gridLineOpacity" type="number" min="0" max="1" step="0.05" />
+            </label>
+            <label class="settings-row">
               <span>网格线颜色</span>
               <input v-model="appSettings.gridLineColor" type="color" />
+            </label>
+            <label class="settings-toggle">
+              <input v-model="appSettings.showWeekNumberAxis" type="checkbox" />
+              <span>显示周数轴</span>
+            </label>
+            <label class="settings-row">
+              <span>第 1 周起始日</span>
+              <input v-model="appSettings.firstWeekStart" type="date" />
+            </label>
+            <label class="settings-toggle">
+              <input v-model="appSettings.workdayBackgroundEnabled" type="checkbox" />
+              <span>填充工作日背景</span>
+            </label>
+            <label class="settings-row">
+              <span>工作日背景色</span>
+              <input v-model="appSettings.workdayBackground" type="color" />
+            </label>
+            <label class="settings-toggle">
+              <input v-model="appSettings.weekendBackgroundEnabled" type="checkbox" />
+              <span>填充周末背景</span>
+            </label>
+            <label class="settings-row">
+              <span>周末背景色</span>
+              <input v-model="appSettings.weekendBackground" type="color" />
             </label>
           </section>
 
@@ -3134,7 +3386,7 @@ button.primary {
 
 .task-row {
   position: relative;
-  grid-template-columns: 26px 30px minmax(0, 1fr) 34px;
+  grid-template-columns: 26px 30px minmax(0, 1fr) 34px 30px;
 }
 
 .task-row.section-row {
@@ -3289,6 +3541,16 @@ button.primary {
   cursor: pointer;
 }
 
+.apply-task-color {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  padding: 0;
+}
+
 .name-input,
 .date-input,
 .duration-input,
@@ -3379,8 +3641,23 @@ button.primary {
   border-bottom: var(--grid-line-width) solid var(--grid-line-color);
 }
 
+.week-number-row {
+  position: sticky;
+  top: 38px;
+  z-index: 4;
+  display: flex;
+  height: 38px;
+  border-bottom: var(--grid-line-width) solid var(--grid-line-color);
+  background: #ffffff;
+}
+
+.timeline-pane.has-week-axis .unit-row {
+  top: 76px;
+}
+
 .year-segment,
-.unit-cell {
+.unit-cell,
+.week-number-cell {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3389,6 +3666,24 @@ button.primary {
   border-right: var(--grid-line-width) solid var(--grid-line-color);
   color: #68727f;
   white-space: nowrap;
+}
+
+.week-number-cell {
+  height: 100%;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  color: #5d6876;
+  font-size: 12px;
+}
+
+.week-number-cell.anchor {
+  color: #1959d1;
+  font-weight: 800;
+  background: #eef4ff;
 }
 
 .year-segment {
@@ -4010,7 +4305,7 @@ button.primary {
   }
 
   .task-row {
-    grid-template-columns: 24px 28px minmax(0, 1fr) 32px;
+    grid-template-columns: 24px 28px minmax(0, 1fr) 32px 28px;
   }
 
   .task-row.section-row {
