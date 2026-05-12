@@ -45,10 +45,13 @@ import {
 } from "./domain/gantt";
 
 type DragMode = "move" | "resize";
+type TimelineItemKind = "subtask" | "association";
 
 interface DragState {
   taskId: string;
   subtaskId: string;
+  parentSubtaskId?: string;
+  itemKind: TimelineItemKind;
   mode: DragMode;
   startX: number;
   pointerX: number;
@@ -67,6 +70,8 @@ interface ContextMenuState {
   y: number;
   taskId: string;
   subtaskId?: string;
+  parentSubtaskId?: string;
+  itemKind?: TimelineItemKind;
   date?: string;
 }
 
@@ -140,6 +145,8 @@ const SECTION_ROW_HEIGHT = 44;
 const SUBTASK_BAR_TOP = 38;
 const SUBTASK_META_TOP = 9;
 const SUBTASK_ROW_BOTTOM = 12;
+const ASSOCIATION_TOP_GAP = 32;
+const ASSOCIATION_ROW_GAP = 10;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
@@ -263,7 +270,7 @@ const selectedSubtask = computed(() => {
     return null;
   }
 
-  return task.subtasks.find((subtask) => subtask.id === selectedSubtaskId.value) ?? task.subtasks[0] ?? null;
+  return findSubtaskInList(task.subtasks, selectedSubtaskId.value) ?? task.subtasks[0] ?? null;
 });
 const subtaskDropPreview = computed(() => {
   const drag = dragState.value;
@@ -634,10 +641,7 @@ function copySelectedSubtask() {
     return;
   }
 
-  copiedSubtask.value = {
-    ...subtask,
-    children: subtask.children.map((child) => ({ ...child })),
-  };
+  copiedSubtask.value = cloneSubtask(subtask);
   statusMessage.value = `已复制子任务 ${subtask.name}`;
 }
 
@@ -664,6 +668,9 @@ function pasteCopiedSubtask() {
     name: child.name,
     completed: child.completed,
   }));
+  subtask.associations = source.associations.map((association, index) =>
+    cloneSubtaskWithFreshIds(association, `${subtask.id}-association-copy-${index + 1}`),
+  );
   targetTask.subtasks.push(subtask);
   selectSubtask(targetTask, subtask);
   statusMessage.value = `已粘贴子任务 ${subtask.name}`;
@@ -680,6 +687,27 @@ function deleteSelectedSubtask() {
   task.subtasks = task.subtasks.filter((item) => item.id !== subtask.id);
   selectTask(task, task.subtasks[0]);
   statusMessage.value = `已删除子任务 ${subtask.name}`;
+}
+
+function cloneSubtask(subtask: GanttSubtask): GanttSubtask {
+  return {
+    ...subtask,
+    children: subtask.children.map((child) => ({ ...child })),
+    associations: subtask.associations.map(cloneSubtask),
+  };
+}
+
+function cloneSubtaskWithFreshIds(subtask: GanttSubtask, idPrefix: string): GanttSubtask {
+  const cloned = cloneSubtask(subtask);
+  cloned.id = `${idPrefix}-${Date.now().toString(36)}`;
+  cloned.children = cloned.children.map((child, index) => ({
+    ...child,
+    id: createSecondLevelId(cloned.id, index),
+  }));
+  cloned.associations = cloned.associations.map((association, index) =>
+    cloneSubtaskWithFreshIds(association, `${cloned.id}-association-${index + 1}`),
+  );
+  return cloned;
 }
 
 function setScale(scale: GanttScale) {
@@ -702,7 +730,14 @@ function scrollToTaskRange() {
   scrollToDate(firstStart, 0.2);
 }
 
-function beginSubtaskDrag(event: PointerEvent, task: GanttTask, subtask: GanttSubtask, mode: DragMode) {
+function beginSubtaskDrag(
+  event: PointerEvent,
+  task: GanttTask,
+  subtask: GanttSubtask,
+  mode: DragMode,
+  itemKind: TimelineItemKind = "subtask",
+  parentSubtaskId?: string,
+) {
   if (task.locked) {
     return;
   }
@@ -714,6 +749,8 @@ function beginSubtaskDrag(event: PointerEvent, task: GanttTask, subtask: GanttSu
   dragState.value = {
     taskId: task.id,
     subtaskId: subtask.id,
+    parentSubtaskId,
+    itemKind,
     mode,
     startX: event.clientX,
     pointerX: event.clientX,
@@ -737,7 +774,11 @@ function updateSubtaskDrag(event: PointerEvent) {
   drag.pointerY = event.clientY;
 
   const task = doc.value.tasks.find((item) => item.id === drag.taskId);
-  const subtask = task?.subtasks.find((item) => item.id === drag.subtaskId);
+  const parentSubtask = drag.parentSubtaskId ? findSubtaskById(drag.parentSubtaskId) : null;
+  const subtask =
+    drag.itemKind === "association"
+      ? parentSubtask?.associations.find((item) => item.id === drag.subtaskId)
+      : task?.subtasks.find((item) => item.id === drag.subtaskId);
 
   if (!subtask) {
     subtaskDropTargetId.value = null;
@@ -749,17 +790,36 @@ function updateSubtaskDrag(event: PointerEvent) {
   if (drag.mode === "move") {
     const targetTask = taskFromTimelinePoint(event.clientX, event.clientY);
     subtaskDropTargetId.value =
-      targetTask && targetTask.id !== task?.id && !targetTask.locked ? targetTask.id : null;
+      targetTask && (targetTask.id !== task?.id || drag.itemKind === "association") && !targetTask.locked
+        ? targetTask.id
+        : null;
   }
 
   const deltaDays = Math.round((event.clientX - drag.startX) / dayWidth.value);
+  const nextStart = addDays(drag.initialStart, deltaDays);
 
   if (drag.mode === "move") {
-    subtask.start = addDays(drag.initialStart, deltaDays);
+    if (drag.itemKind === "association" && parentSubtask) {
+      subtask.start = constrainAssociationStart(parentSubtask, subtask, nextStart);
+      return;
+    }
+
+    const childShift = differenceInDays(subtask.start, nextStart);
+    subtask.start = nextStart;
+    subtask.associations.forEach((association) => {
+      association.start = addDays(association.start, childShift);
+    });
     return;
   }
 
-  subtask.duration = normalizeDuration(drag.initialDuration + deltaDays);
+  const nextDuration = normalizeDuration(drag.initialDuration + deltaDays);
+
+  if (drag.itemKind === "association" && parentSubtask) {
+    subtask.duration = constrainAssociationDuration(parentSubtask, subtask, nextDuration);
+    return;
+  }
+
+  subtask.duration = Math.max(nextDuration, minimumDurationForAssociations(subtask));
 }
 
 function endSubtaskDrag(event?: PointerEvent) {
@@ -782,9 +842,15 @@ function moveDraggedSubtaskToDropTarget(pointer: Pick<DragState, "pointerX" | "p
   }
 
   const sourceTask = doc.value.tasks.find((task) => task.id === drag.taskId);
+  const pointedSubtask = subtaskFromTimelinePoint(pointer.pointerX, pointer.pointerY);
   const targetTask = taskFromTimelinePoint(pointer.pointerX, pointer.pointerY);
 
-  if (!sourceTask || !targetTask || sourceTask.id === targetTask.id || targetTask.locked) {
+  if (!sourceTask || !targetTask || targetTask.locked) {
+    return;
+  }
+
+  if (drag.itemKind === "association") {
+    finishAssociationDrop(drag, targetTask, pointedSubtask);
     return;
   }
 
@@ -794,10 +860,63 @@ function moveDraggedSubtaskToDropTarget(pointer: Pick<DragState, "pointerX" | "p
     return;
   }
 
+  if (pointedSubtask && pointedSubtask.subtask.id !== drag.subtaskId) {
+    const [subtask] = sourceTask.subtasks.splice(subtaskIndex, 1);
+    const promotedAssociations = subtask.associations.splice(0);
+    promotedAssociations.forEach((association) => {
+      sourceTask.subtasks.push(association);
+    });
+    const target = pointedSubtask.subtask;
+    const associated = fitAssociationIntoParent(subtask, target);
+    target.associations.push(associated);
+    selectSubtask(pointedSubtask.task, target);
+    statusMessage.value = `已将子任务 ${subtask.name} 转为 ${target.name} 的关联项`;
+    return;
+  }
+
+  if (sourceTask.id === targetTask.id) {
+    return;
+  }
+
   const [subtask] = sourceTask.subtasks.splice(subtaskIndex, 1);
   targetTask.subtasks.push(subtask);
   selectSubtask(targetTask, subtask);
   statusMessage.value = `已将子任务 ${subtask.name} 移动到 ${targetTask.name}`;
+}
+
+function finishAssociationDrop(
+  drag: DragState,
+  targetTask: GanttTask,
+  pointedSubtask: { task: GanttTask; subtask: GanttSubtask } | null,
+) {
+  const sourceParent = drag.parentSubtaskId ? findSubtaskById(drag.parentSubtaskId) : null;
+  const associationIndex = sourceParent?.associations.findIndex((item) => item.id === drag.subtaskId) ?? -1;
+
+  if (!sourceParent || associationIndex < 0) {
+    return;
+  }
+
+  const [association] = sourceParent.associations.splice(associationIndex, 1);
+
+  if (pointedSubtask?.subtask.id === association.id) {
+    sourceParent.associations.splice(associationIndex, 0, association);
+    return;
+  }
+
+  if (
+    pointedSubtask &&
+    pointedSubtask.subtask.id !== sourceParent.id &&
+    pointedSubtask.subtask.id !== association.id
+  ) {
+    pointedSubtask.subtask.associations.push(fitAssociationIntoParent(association, pointedSubtask.subtask));
+    selectSubtask(pointedSubtask.task, pointedSubtask.subtask);
+    statusMessage.value = `已将关联项 ${association.name} 挂靠到 ${pointedSubtask.subtask.name}`;
+    return;
+  }
+
+  targetTask.subtasks.push(association);
+  selectSubtask(targetTask, association);
+  statusMessage.value = `已将关联项 ${association.name} 升级为子任务`;
 }
 
 function taskFromTimelinePoint(clientX: number, clientY: number) {
@@ -830,6 +949,93 @@ function taskFromTimelinePoint(clientX: number, clientY: number) {
   }
 
   return null;
+}
+
+function subtaskFromTimelinePoint(clientX: number, clientY: number) {
+  const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+  const bar = element?.closest<HTMLElement>("[data-subtask-id]");
+  const taskId = bar?.dataset.taskId;
+  const subtaskId = bar?.dataset.subtaskId;
+
+  if (!taskId || !subtaskId) {
+    return null;
+  }
+
+  const task = doc.value.tasks.find((item) => item.id === taskId);
+  const subtask = task ? findSubtaskInList(task.subtasks, subtaskId) : null;
+
+  return task && subtask ? { task, subtask } : null;
+}
+
+function constrainAssociationStart(parent: GanttSubtask, association: GanttSubtask, nextStart: string) {
+  const parentEnd = endDate(parent);
+  const maxStart = addDays(parentEnd, -normalizeDuration(association.duration));
+  let candidate = nextStart < parent.start ? parent.start : nextStart;
+  candidate = candidate > maxStart ? maxStart : candidate;
+
+  return associationConflicts(parent, association, candidate, normalizeDuration(association.duration))
+    ? association.start
+    : candidate;
+}
+
+function constrainAssociationDuration(parent: GanttSubtask, association: GanttSubtask, nextDuration: number) {
+  const parentRemaining = Math.max(1, differenceInDays(association.start, endDate(parent)));
+  const candidate = Math.min(normalizeDuration(nextDuration), parentRemaining);
+
+  return associationConflicts(parent, association, association.start, candidate) ? association.duration : candidate;
+}
+
+function associationConflicts(parent: GanttSubtask, association: GanttSubtask, start: string, duration: number) {
+  const end = addDays(start, normalizeDuration(duration));
+
+  return parent.associations.some((sibling) => {
+    if (sibling.id === association.id) {
+      return false;
+    }
+
+    return start < endDate(sibling) && end > sibling.start;
+  });
+}
+
+function minimumDurationForAssociations(subtask: GanttSubtask) {
+  if (!subtask.associations.length) {
+    return 1;
+  }
+
+  const associationEnds = subtask.associations.map(endDate).sort();
+  const lastAssociationEnd = associationEnds[associationEnds.length - 1] ?? subtask.start;
+  return Math.max(1, differenceInDays(subtask.start, lastAssociationEnd));
+}
+
+function fitAssociationIntoParent(association: GanttSubtask, parent: GanttSubtask) {
+  const fitted = association;
+  const parentDuration = normalizeDuration(parent.duration);
+  fitted.duration = Math.min(normalizeDuration(fitted.duration), parentDuration);
+  fitted.start = fitted.start < parent.start ? parent.start : fitted.start;
+
+  if (endDate(fitted) > endDate(parent)) {
+    fitted.start = addDays(endDate(parent), -fitted.duration);
+  }
+
+  if (associationConflicts(parent, fitted, fitted.start, fitted.duration)) {
+    fitted.start = firstAvailableAssociationStart(parent, fitted);
+  }
+
+  return fitted;
+}
+
+function firstAvailableAssociationStart(parent: GanttSubtask, association: GanttSubtask) {
+  const maxOffset = Math.max(0, normalizeDuration(parent.duration) - normalizeDuration(association.duration));
+
+  for (let offset = 0; offset <= maxOffset; offset += 1) {
+    const start = addDays(parent.start, offset);
+
+    if (!associationConflicts(parent, association, start, association.duration)) {
+      return start;
+    }
+  }
+
+  return parent.start;
 }
 
 function beginTimelinePan(event: PointerEvent) {
@@ -908,7 +1114,13 @@ function scrollTaskTableWheel(event: WheelEvent) {
   syncTimelineScroll();
 }
 
-function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubtask) {
+function openContextMenu(
+  event: MouseEvent,
+  task: GanttTask,
+  subtask?: GanttSubtask,
+  itemKind: TimelineItemKind = "subtask",
+  parentSubtaskId?: string,
+) {
   event.preventDefault();
   finishSubtaskTextEdit();
   taskListMenu.value = null;
@@ -918,6 +1130,8 @@ function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubt
     y: event.clientY,
     taskId: task.id,
     subtaskId: subtask?.id,
+    parentSubtaskId,
+    itemKind,
     date: dateFromTimelineEvent(event),
   };
 }
@@ -987,10 +1201,26 @@ function createSecondLevelId(subtaskId: string, index: number) {
 
 function findSubtaskById(id: string) {
   for (const task of doc.value.tasks) {
-    const subtask = task.subtasks.find((item) => item.id === id);
+    const subtask = findSubtaskInList(task.subtasks, id);
 
     if (subtask) {
       return subtask;
+    }
+  }
+
+  return null;
+}
+
+function findSubtaskInList(subtasks: GanttSubtask[], id: string): GanttSubtask | null {
+  for (const subtask of subtasks) {
+    if (subtask.id === id) {
+      return subtask;
+    }
+
+    const association = findSubtaskInList(subtask.associations, id);
+
+    if (association) {
+      return association;
     }
   }
 
@@ -1478,6 +1708,30 @@ function addSubtaskFromContext() {
   closeContextMenu();
 }
 
+function addAssociationFromContext() {
+  const task = contextTask();
+  const subtask = contextSubtask();
+
+  if (!task || !subtask || contextMenu.value?.itemKind === "association") {
+    closeContextMenu();
+    return;
+  }
+
+  const association = createSubtask(
+    doc.value.tasks.indexOf(task) + 1,
+    subtask.associations.length + 1,
+    `关联项 ${subtask.associations.length + 1}`,
+    subtask.start,
+    subtask.color || task.color || appSettings.value.defaultSubtaskColor,
+  );
+  association.duration = Math.min(association.duration, normalizeDuration(subtask.duration));
+  association.start = firstAvailableAssociationStart(subtask, association);
+  subtask.associations.push(association);
+  selectSubtask(task, subtask);
+  statusMessage.value = `已为 ${subtask.name} 添加关联项`;
+  closeContextMenu();
+}
+
 function deleteSubtaskFromContext() {
   const task = contextTask();
   const subtask = contextSubtask();
@@ -1493,6 +1747,20 @@ function deleteSubtaskFromContext() {
   closeContextMenu();
 }
 
+function deleteAssociationFromContext() {
+  const parent = contextParentSubtask();
+  const association = contextSubtask();
+
+  if (!parent || !association) {
+    closeContextMenu();
+    return;
+  }
+
+  parent.associations = parent.associations.filter((item) => item.id !== association.id);
+  statusMessage.value = `已删除关联项 ${association.name}`;
+  closeContextMenu();
+}
+
 function contextTask() {
   return contextMenu.value ? doc.value.tasks.find((task) => task.id === contextMenu.value?.taskId) ?? null : null;
 }
@@ -1504,7 +1772,15 @@ function contextSubtask() {
     return null;
   }
 
-  return task.subtasks.find((subtask) => subtask.id === contextMenu.value?.subtaskId) ?? null;
+  return findSubtaskInList(task.subtasks, contextMenu.value.subtaskId);
+}
+
+function contextParentSubtask() {
+  if (!contextMenu.value?.parentSubtaskId) {
+    return null;
+  }
+
+  return findSubtaskById(contextMenu.value.parentSubtaskId);
 }
 
 function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
@@ -1557,10 +1833,19 @@ function taskRowHeight(task: GanttTask) {
   return Math.max(
     TASK_ROW_HEIGHT,
     ...task.subtasks.map((subtask) => {
-      const layout = subtaskLayout(task, subtask);
-      return layout.height + SUBTASK_BAR_TOP + SUBTASK_ROW_BOTTOM;
+      return subtaskLaneBottom(task, subtask);
     }),
   );
+}
+
+function subtaskLaneBottom(task: GanttTask, subtask: GanttSubtask) {
+  const layout = subtaskLayout(task, subtask);
+  const associationBottoms = subtask.associations.map((association, index) => {
+    const associationLayout = associationBarLayout(association);
+    return associationTop(task, subtask, index) + associationLayout.height;
+  });
+
+  return Math.max(layout.height + SUBTASK_BAR_TOP, ...associationBottoms) + SUBTASK_ROW_BOTTOM;
 }
 
 function subtaskLayout(task: GanttTask, target: GanttSubtask) {
@@ -1574,6 +1859,66 @@ function subtaskLayout(task: GanttTask, target: GanttSubtask) {
 
 function subtaskLayouts(task: GanttTask) {
   return buildSubtaskLayouts(task.subtasks);
+}
+
+function associationBarLayout(association: GanttSubtask): SubtaskLayout {
+  const width = renderedSubtaskWidth(association);
+
+  return {
+    left: dateToX(association.start),
+    width,
+    height: renderedSubtaskHeight(association, width),
+  };
+}
+
+function associationTop(task: GanttTask, subtask: GanttSubtask, index: number) {
+  const layout = subtaskLayout(task, subtask);
+  const previousHeight = subtask.associations.slice(0, index).reduce((total, association) => {
+    return total + associationBarLayout(association).height + ASSOCIATION_ROW_GAP;
+  }, 0);
+
+  return SUBTASK_BAR_TOP + layout.height + ASSOCIATION_TOP_GAP + previousHeight;
+}
+
+function associationBarStyle(task: GanttTask, subtask: GanttSubtask, association: GanttSubtask, index: number) {
+  const layout = associationBarLayout(association);
+  const color = association.color || subtask.color || task.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR;
+
+  return {
+    left: `${layout.left}px`,
+    top: `${associationTop(task, subtask, index)}px`,
+    width: `${layout.width}px`,
+    height: `${layout.height}px`,
+    background: color,
+    color: readableTextColor(color),
+    "--bar-color": color,
+  };
+}
+
+function associationMetaStyle(task: GanttTask, subtask: GanttSubtask, association: GanttSubtask, index: number) {
+  const layout = associationBarLayout(association);
+
+  return {
+    left: `${layout.left}px`,
+    top: `${associationTop(task, subtask, index) - 29}px`,
+  };
+}
+
+function associationArrowStyle(task: GanttTask, subtask: GanttSubtask, association: GanttSubtask, index: number) {
+  const parentLayout = subtaskLayout(task, subtask);
+  const associationLayout = associationBarLayout(association);
+  const parentCenter = parentLayout.left + parentLayout.width / 2;
+  const associationCenter = associationLayout.left + associationLayout.width / 2;
+  const top = SUBTASK_BAR_TOP + parentLayout.height + 3;
+
+  return {
+    left: `${Math.min(parentCenter, associationCenter)}px`,
+    top: `${top}px`,
+    width: `${Math.abs(parentCenter - associationCenter)}px`,
+    height: `${Math.max(8, associationTop(task, subtask, index) - top)}px`,
+    "--arrow-x": `${parentCenter <= associationCenter ? "0" : "100%"}`,
+    "--arrow-target-x": `${parentCenter <= associationCenter ? "100%" : "0"}`,
+  };
 }
 
 function buildSubtaskLayouts(subtasks: GanttSubtask[]) {
@@ -2159,6 +2504,8 @@ function isEditableTarget(target: EventTarget | null) {
                       role="button"
                       tabindex="0"
                       class="subtask-bar"
+                      :data-task-id="row.task.id"
+                      :data-subtask-id="subtask.id"
                       :class="{
                         locked: row.task.locked,
                         selected: subtask.id === selectedSubtaskId,
@@ -2221,6 +2568,122 @@ function isEditableTarget(target: EventTarget | null) {
                         @pointerdown.stop="beginSubtaskDrag($event, row.task, subtask, 'resize')"
                       ></i>
                     </div>
+
+                    <template v-for="(association, associationIndex) in subtask.associations" :key="association.id">
+                      <div
+                        v-if="row.type === 'task'"
+                        class="association-arrow"
+                        :style="associationArrowStyle(row.task, subtask, association, associationIndex)"
+                      ></div>
+                      <div
+                        v-if="row.type === 'task' && !shouldHideDraggedSourceSubtask(row.task, association)"
+                        class="subtask-meta association-meta"
+                        :style="associationMetaStyle(row.task, subtask, association, associationIndex)"
+                      >
+                        <button
+                          type="button"
+                          class="fold-button"
+                          :class="{ disabled: !association.children.length }"
+                          :title="association.expanded ? '折叠' : '展开'"
+                          @click.stop="toggleSubtaskExpanded(row.task, association)"
+                          @pointerdown.stop
+                        >
+                          <ChevronDown v-if="association.expanded && association.children.length" :size="16" />
+                          <ChevronRight v-else :size="16" />
+                        </button>
+                        <input
+                          class="completion-checkbox primary-completion-checkbox"
+                          type="checkbox"
+                          :checked="association.completed"
+                          aria-label="标记关联项完成"
+                          @change="setSubtaskCompleted(association, $event)"
+                          @click.stop
+                          @pointerdown.stop
+                        />
+                        <span v-if="association.duration >= 3" class="duration-label">
+                          {{ association.duration }} 天
+                        </span>
+                        <button
+                          v-if="editingSubtaskId === association.id"
+                          type="button"
+                          class="subtask-edit-save"
+                          title="保存编辑"
+                          @click.stop="finishSubtaskTextEdit"
+                          @pointerdown.stop
+                        >
+                          <Check :size="18" />
+                        </button>
+                      </div>
+
+                      <div
+                        v-if="row.type === 'task' && !shouldHideDraggedSourceSubtask(row.task, association)"
+                        role="button"
+                        tabindex="0"
+                        class="subtask-bar association-bar"
+                        :data-task-id="row.task.id"
+                        :data-subtask-id="association.id"
+                        :data-parent-subtask-id="subtask.id"
+                        :class="{
+                          locked: row.task.locked,
+                          selected: association.id === selectedSubtaskId,
+                          completed: association.completed,
+                          expanded: isSubtaskExpandedVisible(association),
+                          editing: editingSubtaskId === association.id,
+                        }"
+                        :style="associationBarStyle(row.task, subtask, association, associationIndex)"
+                        :title="`${row.task.name} / ${subtask.name} / ${association.name}: ${association.start} - ${endDate(association)}`"
+                        @click.stop="selectSubtask(row.task, association)"
+                        @dblclick.stop="startSubtaskTextEdit(row.task, association)"
+                        @contextmenu.stop="openContextMenu($event, row.task, association, 'association', subtask.id)"
+                        @pointerdown="beginSubtaskDrag($event, row.task, association, 'move', 'association', subtask.id)"
+                      >
+                        <textarea
+                          v-if="editingSubtaskId === association.id"
+                          ref="subtaskTextEditor"
+                          v-model="editingSubtaskText"
+                          class="subtask-text-editor"
+                          aria-label="关联项局部编辑"
+                          @blur="finishSubtaskTextEdit"
+                          @click.stop
+                          @dblclick.stop
+                          @keydown.ctrl.enter.stop.prevent="finishSubtaskTextEdit"
+                          @keydown.meta.enter.stop.prevent="finishSubtaskTextEdit"
+                          @keydown.esc.stop.prevent="cancelSubtaskTextEdit"
+                          @pointerdown.stop
+                        ></textarea>
+                        <span v-else-if="isSubtaskExpandedVisible(association)" class="expanded-subtask-lines">
+                          <span class="task-name-line primary-line" :class="{ completed: association.completed }">
+                            <span class="task-name-text">{{ association.name }}</span>
+                          </span>
+                          <span
+                            v-for="child in association.children"
+                            :key="child.id"
+                            class="task-name-line secondary-line"
+                            :class="{ completed: child.completed }"
+                          >
+                            <input
+                              class="completion-checkbox secondary-completion-checkbox"
+                              type="checkbox"
+                              :checked="child.completed"
+                              aria-label="标记关联项子项完成"
+                              @change="setSecondLevelCompleted(child, $event)"
+                              @click.stop
+                              @pointerdown.stop
+                            />
+                            <span class="task-name-text">{{ child.name }}</span>
+                          </span>
+                        </span>
+                        <span v-else class="task-name-line primary-line" :class="{ completed: association.completed }">
+                          <span class="task-name-text">{{ association.name }}</span>
+                        </span>
+                        <i
+                          v-if="editingSubtaskId !== association.id"
+                          class="resize-handle"
+                          title="调整工期"
+                          @pointerdown.stop="beginSubtaskDrag($event, row.task, association, 'resize', 'association', subtask.id)"
+                        ></i>
+                      </div>
+                    </template>
                   </template>
                 </div>
               </div>
@@ -2355,7 +2818,21 @@ function isEditableTarget(target: EventTarget | null) {
       @click.stop
     >
       <button type="button" @click="addSubtaskFromContext">添加子任务</button>
-      <button type="button" :disabled="!contextMenu.subtaskId" @click="deleteSubtaskFromContext">
+      <button
+        type="button"
+        :disabled="!contextMenu.subtaskId || contextMenu.itemKind === 'association'"
+        @click="addAssociationFromContext"
+      >
+        添加关联项
+      </button>
+      <button
+        type="button"
+        :disabled="contextMenu.itemKind !== 'association'"
+        @click="deleteAssociationFromContext"
+      >
+        删除关联项
+      </button>
+      <button type="button" :disabled="!contextMenu.subtaskId || contextMenu.itemKind === 'association'" @click="deleteSubtaskFromContext">
         删除子任务
       </button>
     </div>
@@ -3072,6 +3549,42 @@ button.primary {
 .subtask-bar.locked {
   cursor: default;
   opacity: 0.72;
+}
+
+.association-bar {
+  border-radius: 7px;
+}
+
+.association-meta {
+  z-index: 7;
+}
+
+.association-arrow {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.association-arrow::before {
+  content: "";
+  position: absolute;
+  left: var(--arrow-x);
+  top: 0;
+  bottom: 7px;
+  width: 2px;
+  background: rgba(104, 114, 127, 0.45);
+}
+
+.association-arrow::after {
+  content: "";
+  position: absolute;
+  left: var(--arrow-target-x);
+  bottom: 0;
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid rgba(104, 114, 127, 0.55);
+  border-bottom: 2px solid rgba(104, 114, 127, 0.55);
+  transform: translateX(-50%) rotate(45deg);
 }
 
 .subtask-bar span {

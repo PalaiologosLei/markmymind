@@ -9,6 +9,7 @@ export interface GanttSubtask {
   completed: boolean;
   expanded: boolean;
   children: GanttSecondLevelSubtask[];
+  associations: GanttSubtask[];
 }
 
 export interface GanttSecondLevelSubtask {
@@ -353,6 +354,7 @@ export function parseGanttSource(source: string): GanttParseResult {
           typeof subtaskMeta?.color === "string" && subtaskMeta.color
             ? subtaskMeta.color
             : subtask.color || nextTask.color,
+        associations: readAssociatedSubtasks(subtaskMeta?.associations, subtask.color || nextTask.color),
       };
     });
 
@@ -407,6 +409,7 @@ export function serializeGanttDocument(doc: GanttDocument): string {
           completed: subtask.completed,
           expanded: subtask.children.length > 0 && subtask.expanded,
           children: subtask.children,
+          associations: subtask.associations,
         })}`,
       );
     });
@@ -487,6 +490,7 @@ export function createSubtask(
     completed: false,
     expanded: false,
     children: [],
+    associations: [],
   };
 }
 
@@ -587,6 +591,7 @@ function parseTaskLine(line: string, sectionId: string, fallbackIndex: number): 
             completed: false,
             expanded: false,
             children: [],
+            associations: [],
           },
         ],
   };
@@ -630,6 +635,7 @@ function parseSubtaskLine(
       completed: false,
       expanded: false,
       children: [],
+      associations: [],
     },
   };
 }
@@ -699,18 +705,7 @@ function normalizeDocumentStructure(doc: GanttDocument) {
     sectionId: sectionIds.has(task.sectionId) ? task.sectionId : "",
     locked: task.locked === true,
     color: task.color || DEFAULT_TASK_COLOR,
-    subtasks: ensureTaskSubtasks(task).map((subtask) => ({
-      ...subtask,
-      duration: normalizeDuration(subtask.duration),
-      color: subtask.color || task.color || DEFAULT_SUBTASK_COLOR,
-      completed: subtask.completed === true,
-      expanded: subtask.children.length > 0 && subtask.expanded === true,
-      children: subtask.children.map((child, childIndex) => ({
-        id: child.id || `child-${childIndex + 1}`,
-        name: child.name,
-        completed: child.completed === true,
-      })),
-    })),
+    subtasks: ensureTaskSubtasks(task).map((subtask) => normalizeSubtask(subtask, task.color || DEFAULT_SUBTASK_COLOR)),
   }));
 
   doc.outline = normalizedOutlineItems(doc);
@@ -753,6 +748,25 @@ function normalizedOutlineItems(doc: GanttDocument): GanttOutlineItem[] {
   });
 
   return items;
+}
+
+function normalizeSubtask(subtask: GanttSubtask, fallbackColor: string): GanttSubtask {
+  const color = subtask.color || fallbackColor || DEFAULT_SUBTASK_COLOR;
+  const children = (subtask.children ?? []).map((child, childIndex) => ({
+    id: child.id || `child-${childIndex + 1}`,
+    name: child.name,
+    completed: child.completed === true,
+  }));
+
+  return {
+    ...subtask,
+    duration: normalizeDuration(subtask.duration),
+    color,
+    completed: subtask.completed === true,
+    expanded: children.length > 0 && subtask.expanded === true,
+    children,
+    associations: (subtask.associations ?? []).map((association) => normalizeSubtask(association, color)),
+  };
 }
 
 function ensureSection(doc: GanttDocument, name: string): GanttSection {
@@ -814,6 +828,43 @@ function readSecondLevelSubtasks(value: unknown): GanttSecondLevelSubtask[] {
       };
     })
     .filter((item): item is GanttSecondLevelSubtask => Boolean(item));
+}
+
+function readAssociatedSubtasks(value: unknown, fallbackColor = DEFAULT_SUBTASK_COLOR): GanttSubtask[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item, index) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+
+      const record = item as Record<string, unknown>;
+      const name = typeof record.name === "string" ? sanitizeLine(record.name) : "";
+      const start = typeof record.start === "string" && isIsoDate(record.start) ? record.start : todayIso();
+
+      if (!name) {
+        return null;
+      }
+
+      const subtask: GanttSubtask = {
+        id: typeof record.id === "string" && record.id ? record.id : `association-${Date.now().toString(36)}-${index + 1}`,
+        name,
+        start,
+        duration: normalizeDuration(typeof record.duration === "number" ? record.duration : 1),
+        color: typeof record.color === "string" && record.color ? record.color : fallbackColor,
+        completed: record.completed === true,
+        expanded: false,
+        children: readSecondLevelSubtasks(record.children),
+        associations: readAssociatedSubtasks(record.associations, fallbackColor),
+      };
+
+      subtask.expanded = subtask.children.length > 0 && record.expanded === true;
+      return subtask;
+    })
+    .filter((item): item is GanttSubtask => Boolean(item));
 }
 
 function splitTokens(value: string): string[] {
