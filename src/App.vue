@@ -92,6 +92,12 @@ interface TaskListMenuState {
   sectionId?: string;
 }
 
+interface WeekNumberMenuState {
+  x: number;
+  y: number;
+  weekStart: string;
+}
+
 type TaskListRow =
   | {
       type: "section";
@@ -161,12 +167,14 @@ interface AppSettings {
   defaultSubtaskDuration: number;
 }
 
-const TASK_ROW_HEIGHT = 82;
+const TASK_ROW_HEIGHT = 56;
 const SECTION_ROW_HEIGHT = 44;
-const SUBTASK_BAR_TOP = 38;
-const SUBTASK_META_TOP = 9;
-const SUBTASK_ROW_BOTTOM = 12;
-const LINK_ROW_GAP = 34;
+const SUBTASK_META_TOP = 4;
+const SUBTASK_META_HEIGHT = 18;
+const SUBTASK_META_BAR_GAP = 3;
+const SUBTASK_BAR_TOP = SUBTASK_META_TOP + SUBTASK_META_HEIGHT + SUBTASK_META_BAR_GAP;
+const SUBTASK_ROW_BOTTOM = 2;
+const LINK_ROW_GAP = SUBTASK_META_HEIGHT + SUBTASK_META_BAR_GAP + 4;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
@@ -216,6 +224,7 @@ const subtaskDropTargetId = ref<string | null>(null);
 const panState = ref<PanState | null>(null);
 const contextMenu = ref<ContextMenuState | null>(null);
 const taskListMenu = ref<TaskListMenuState | null>(null);
+const weekNumberMenu = ref<WeekNumberMenuState | null>(null);
 const taskListDrag = ref<TaskListDragState | null>(null);
 const taskListDropTarget = ref<TaskListDropTarget | null>(null);
 const taskTablePane = ref<HTMLElement | null>(null);
@@ -391,6 +400,9 @@ const weekNumberAxisVisible = computed(
 const timelineHeaderHeight = computed(
   () => TIMELINE_HEADER_ROW_HEIGHT * (weekNumberAxisVisible.value ? 3 : 2),
 );
+const taskHeaderStyle = computed(() => ({
+  height: `${timelineHeaderHeight.value}px`,
+}));
 const titleModel = computed({
   get: () => doc.value.title,
   set: (value: string) => updateDocumentTitle(value),
@@ -1124,7 +1136,7 @@ function beginTimelinePan(event: PointerEvent) {
     return;
   }
 
-  contextMenu.value = null;
+  closeContextMenu();
   panState.value = {
     startX: event.clientX,
     startY: event.clientY,
@@ -1195,6 +1207,7 @@ function openContextMenu(event: MouseEvent, task: GanttTask, subtask?: GanttSubt
   event.preventDefault();
   finishSubtaskTextEdit();
   taskListMenu.value = null;
+  weekNumberMenu.value = null;
   selectTask(task, subtask);
   const date = dateFromTimelineEvent(event);
   contextMenu.value = {
@@ -1210,6 +1223,7 @@ function openLinkContextMenu(event: MouseEvent, task: GanttTask, subtask: GanttS
   event.preventDefault();
   finishSubtaskTextEdit();
   taskListMenu.value = null;
+  weekNumberMenu.value = null;
   selectSubtask(task, subtask);
   selectedSubtaskId.value = link.id;
   contextMenu.value = {
@@ -1384,6 +1398,7 @@ function expansionScaleForSubtask(subtask: GanttSubtask | GanttLinkedItem): Gant
 function closeContextMenu() {
   contextMenu.value = null;
   taskListMenu.value = null;
+  weekNumberMenu.value = null;
 }
 
 function openTaskListBlankMenu(event: MouseEvent) {
@@ -1396,6 +1411,7 @@ function openTaskListBlankMenu(event: MouseEvent) {
   event.preventDefault();
   finishSubtaskTextEdit();
   contextMenu.value = null;
+  weekNumberMenu.value = null;
   taskListMenu.value = {
     x: event.clientX,
     y: event.clientY,
@@ -1407,6 +1423,7 @@ function openTaskListRowMenu(event: MouseEvent, row: TaskListRow) {
   event.preventDefault();
   finishSubtaskTextEdit();
   contextMenu.value = null;
+  weekNumberMenu.value = null;
 
   if (row.type === "task") {
     selectTask(row.task);
@@ -1952,7 +1969,7 @@ function linkMetaStyle(task: GanttTask, parent: GanttSubtask, link: GanttLinkedI
 
   return {
     left: `${dateToX(link.start)}px`,
-    top: `${top - 29}px`,
+    top: `${top - SUBTASK_META_HEIGHT - SUBTASK_META_BAR_GAP}px`,
   };
 }
 
@@ -2220,6 +2237,29 @@ function cellBackground(segment: UnitSegment) {
   }
 
   return undefined;
+}
+
+function openWeekNumberMenu(event: MouseEvent, segment: WeekNumberSegment) {
+  event.preventDefault();
+  finishSubtaskTextEdit();
+  contextMenu.value = null;
+  taskListMenu.value = null;
+  weekNumberMenu.value = {
+    x: event.clientX,
+    y: event.clientY,
+    weekStart: segment.weekStart,
+  };
+}
+
+function applyWeekNumberAnchor() {
+  const menu = weekNumberMenu.value;
+
+  if (!menu) {
+    return;
+  }
+
+  setFirstWeekStart(menu.weekStart);
+  closeContextMenu();
 }
 
 function setFirstWeekStart(weekStart: string) {
@@ -2577,7 +2617,7 @@ function isEditableTarget(target: EventTarget | null) {
             @wheel.prevent="scrollTaskTableWheel"
             @contextmenu.prevent="openTaskListBlankMenu"
           >
-            <div class="task-header">
+            <div class="task-header" :style="taskHeaderStyle">
               <span class="index-cell"></span>
               <span>任务 / 分组</span>
             </div>
@@ -2682,8 +2722,8 @@ function isEditableTarget(target: EventTarget | null) {
                   class="week-number-cell"
                   :class="{ anchor: segment.weekStart === appSettings.firstWeekStart }"
                   :style="segmentStyle(segment)"
-                  title="右键设为第 1 周"
-                  @contextmenu.prevent="setFirstWeekStart(segment.weekStart)"
+                  title="右键选择周数锚点"
+                  @contextmenu.prevent.stop="openWeekNumberMenu($event, segment)"
                 >
                   {{ segment.label }}
                 </button>
@@ -2738,8 +2778,8 @@ function isEditableTarget(target: EventTarget | null) {
                         @click.stop="toggleSubtaskExpanded(row.task, subtask)"
                         @pointerdown.stop
                       >
-                        <ChevronDown v-if="subtask.expanded && subtask.children.length" :size="16" />
-                        <ChevronRight v-else :size="16" />
+                        <ChevronDown v-if="subtask.expanded && subtask.children.length" :size="14" />
+                        <ChevronRight v-else :size="14" />
                       </button>
                       <input
                         class="completion-checkbox primary-completion-checkbox"
@@ -2761,7 +2801,7 @@ function isEditableTarget(target: EventTarget | null) {
                         @click.stop="finishSubtaskTextEdit"
                         @pointerdown.stop
                       >
-                        <Check :size="18" />
+                        <Check :size="15" />
                       </button>
                     </div>
 
@@ -2844,8 +2884,8 @@ function isEditableTarget(target: EventTarget | null) {
                             @click.stop="toggleSubtaskExpanded(row.task, link, subtask)"
                             @pointerdown.stop
                           >
-                            <ChevronDown v-if="link.expanded && link.children.length" :size="16" />
-                            <ChevronRight v-else :size="16" />
+                            <ChevronDown v-if="link.expanded && link.children.length" :size="14" />
+                            <ChevronRight v-else :size="14" />
                           </button>
                           <input
                             class="completion-checkbox primary-completion-checkbox"
@@ -2867,7 +2907,7 @@ function isEditableTarget(target: EventTarget | null) {
                             @click.stop="finishSubtaskTextEdit"
                             @pointerdown.stop
                           >
-                            <Check :size="18" />
+                            <Check :size="15" />
                           </button>
                         </div>
                         <div
@@ -3143,6 +3183,15 @@ function isEditableTarget(target: EventTarget | null) {
       <button type="button" @click="addTaskFromListMenu">新建任务</button>
       <button type="button" @click="addSectionFromListMenu">新建分组</button>
       <button type="button" :disabled="!taskListMenu.sectionId" @click="dissolveSectionFromListMenu">解散分组</button>
+    </div>
+
+    <div
+      v-if="weekNumberMenu"
+      class="context-menu week-number-menu"
+      :style="{ left: `${weekNumberMenu.x}px`, top: `${weekNumberMenu.y}px` }"
+      @click.stop
+    >
+      <button type="button" @click="applyWeekNumberAnchor">设为第 1 周</button>
     </div>
   </main>
 </template>
@@ -3915,8 +3964,8 @@ button.primary {
   z-index: 6;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 20px;
+  gap: 3px;
+  height: 18px;
   pointer-events: none;
 }
 
@@ -3928,11 +3977,11 @@ button.primary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 20px;
-  width: 20px;
-  height: 20px;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 5px;
   background: transparent;
   color: #4c5561;
   padding: 0;
@@ -4003,8 +4052,8 @@ button.primary {
 }
 
 .primary-completion-checkbox {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
 }
 
 .secondary-completion-checkbox {
@@ -4033,14 +4082,14 @@ button.primary {
 .duration-label {
   display: inline-flex;
   align-items: center;
-  height: 20px;
+  height: 18px;
   flex: 0 0 auto;
   border: 1px solid #75a85e;
-  border-radius: 6px;
-  padding: 0 6px;
+  border-radius: 5px;
+  padding: 0 5px;
   background: #ffffff;
   color: #24303d;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 650;
   line-height: 1;
   box-shadow: 0 1px 1px rgba(22, 35, 52, 0.06);
@@ -4066,11 +4115,11 @@ button.primary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 42px;
-  height: 24px;
+  width: 34px;
+  height: 20px;
   flex: 0 0 auto;
   border: 1px solid #75a85e;
-  border-radius: 6px;
+  border-radius: 5px;
   background: #ffffff;
   color: #172033;
   padding: 0;
