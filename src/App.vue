@@ -2121,6 +2121,16 @@ function isEditableTarget(target: EventTarget | null) {
                       <span v-if="subtask.duration >= 3" class="duration-label">
                         {{ subtask.duration }} 天
                       </span>
+                      <button
+                        v-if="editingSubtaskId === subtask.id"
+                        type="button"
+                        class="subtask-edit-save"
+                        title="保存编辑"
+                        @click.stop="finishSubtaskTextEdit"
+                        @pointerdown.stop
+                      >
+                        <Check :size="18" />
+                      </button>
                     </div>
 
                     <div
@@ -2157,16 +2167,6 @@ function isEditableTarget(target: EventTarget | null) {
                         @keydown.esc.stop.prevent="cancelSubtaskTextEdit"
                         @pointerdown.stop
                       ></textarea>
-                      <button
-                        v-if="editingSubtaskId === subtask.id"
-                        type="button"
-                        class="subtask-edit-save"
-                        title="保存编辑"
-                        @click.stop="finishSubtaskTextEdit"
-                        @pointerdown.stop
-                      >
-                        <Check :size="18" />
-                      </button>
                       <span v-else-if="isSubtaskExpandedVisible(subtask)" class="expanded-subtask-lines">
                         <span class="task-name-line primary-line" :class="{ completed: subtask.completed }">
                           <span class="task-name-text">{{ subtask.name }}</span>
@@ -3053,7 +3053,7 @@ button.primary {
 
 .subtask-bar.editing {
   align-items: stretch;
-  padding: 8px 58px 8px 12px;
+  padding: 8px 12px;
 }
 
 .subtask-bar.locked {
@@ -3216,20 +3216,19 @@ button.primary {
 }
 
 .subtask-edit-save {
-  position: absolute;
-  top: 8px;
-  right: 14px;
-  z-index: 2;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 26px;
+  width: 42px;
+  height: 24px;
+  flex: 0 0 auto;
   border: 1px solid #75a85e;
   border-radius: 6px;
   background: #ffffff;
   color: #172033;
   padding: 0;
+  pointer-events: auto;
+  box-shadow: 0 1px 1px rgba(22, 35, 52, 0.06);
 }
 
 .subtask-edit-save:hover {
