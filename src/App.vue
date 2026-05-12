@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   CalendarDays,
+  Check,
   ChevronDown,
   ChevronRight,
   Code2,
@@ -126,7 +127,7 @@ const SUBTASK_ROW_BOTTOM = 12;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
-const DEFAULT_BAR_COLOR = "#2f6fed";
+const DEFAULT_BAR_COLOR = "#9ac7ff";
 
 const doc = ref<GanttDocument>(createSampleDocument());
 const currentPath = ref<string | null>(null);
@@ -138,6 +139,7 @@ const warnings = ref<string[]>([]);
 const sourcePanelOpen = ref(false);
 const sourceDraft = ref("");
 const dragState = ref<DragState | null>(null);
+const subtaskDropTargetId = ref<string | null>(null);
 const panState = ref<PanState | null>(null);
 const contextMenu = ref<ContextMenuState | null>(null);
 const taskListMenu = ref<TaskListMenuState | null>(null);
@@ -647,7 +649,16 @@ function updateSubtaskDrag(event: PointerEvent) {
   const subtask = task?.subtasks.find((item) => item.id === drag.subtaskId);
 
   if (!subtask) {
+    subtaskDropTargetId.value = null;
     return;
+  }
+
+  subtaskDropTargetId.value = null;
+
+  if (drag.mode === "move") {
+    const targetTask = taskFromTimelinePoint(event.clientX, event.clientY);
+    subtaskDropTargetId.value =
+      targetTask && targetTask.id !== task?.id && !targetTask.locked ? targetTask.id : null;
   }
 
   const deltaDays = Math.round((event.clientX - drag.startX) / dayWidth.value);
@@ -668,6 +679,7 @@ function endSubtaskDrag(event?: PointerEvent) {
   }
 
   dragState.value = null;
+  subtaskDropTargetId.value = null;
   window.removeEventListener("pointermove", updateSubtaskDrag);
 }
 
@@ -1392,6 +1404,7 @@ function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
     width: `${layout.width}px`,
     height: `${layout.height}px`,
     background: color,
+    color: readableTextColor(color),
     "--bar-color": color,
   };
 }
@@ -1489,6 +1502,40 @@ function isPuzzleConnection(left: GanttSubtask, right: GanttSubtask) {
 
 function canRenderPuzzleConnections() {
   return doc.value.view === "day" || doc.value.view === "week" || doc.value.view === "month";
+}
+
+function readableTextColor(color: string) {
+  const rgb = parseHexColor(color);
+
+  if (!rgb) {
+    return "#ffffff";
+  }
+
+  const [red, green, blue] = rgb.map((value) => {
+    const channel = value / 255;
+    return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+
+  return luminance > 0.48 ? "#1f2937" : "#ffffff";
+}
+
+function parseHexColor(color: string): [number, number, number] | null {
+  const normalized = color.trim().replace(/^#/, "");
+
+  if (/^[0-9a-f]{3}$/i.test(normalized)) {
+    return Array.from(normalized).map((char) => Number.parseInt(`${char}${char}`, 16)) as [number, number, number];
+  }
+
+  if (/^[0-9a-f]{6}$/i.test(normalized)) {
+    return [
+      Number.parseInt(normalized.slice(0, 2), 16),
+      Number.parseInt(normalized.slice(2, 4), 16),
+      Number.parseInt(normalized.slice(4, 6), 16),
+    ];
+  }
+
+  return null;
 }
 
 function baseSubtaskWidth(subtask: GanttSubtask) {
@@ -1795,6 +1842,15 @@ function isEditableTarget(target: EventTarget | null) {
                   </button>
                   <span class="index-cell">{{ taskNumber(row.task) }}</span>
                   <input v-model="row.task.name" class="name-input main-name" aria-label="主任务名" />
+                  <input
+                    v-model="row.task.color"
+                    class="task-color-input"
+                    type="color"
+                    title="默认子任务颜色"
+                    aria-label="默认子任务颜色"
+                    @click.stop
+                    @pointerdown.stop
+                  />
                 </template>
               </div>
             </div>
@@ -1830,7 +1886,11 @@ function isEditableTarget(target: EventTarget | null) {
                   v-for="row in taskListRows"
                   :key="row.key"
                   class="timeline-row"
-                  :class="{ selected: row.type === 'task' && row.task.id === selectedTaskId, 'section-timeline-row': row.type === 'section' }"
+                  :class="{
+                    selected: row.type === 'task' && row.task.id === selectedTaskId,
+                    'section-timeline-row': row.type === 'section',
+                    'subtask-drop-target': row.type === 'task' && row.task.id === subtaskDropTargetId,
+                  }"
                   :style="taskListRowStyle(row)"
                   @click="row.type === 'task' && selectTask(row.task)"
                   @contextmenu="row.type === 'task' && openContextMenu($event, row.task)"
@@ -1867,7 +1927,7 @@ function isEditableTarget(target: EventTarget | null) {
                         <ChevronDown v-if="subtask.expanded && subtask.children.length" :size="16" />
                         <ChevronRight v-else :size="16" />
                       </button>
-                      <span v-if="!isSubtaskExpandedVisible(subtask) && subtask.duration >= 3" class="duration-label">
+                      <span v-if="subtask.duration >= 3" class="duration-label">
                         {{ subtask.duration }} 天
                       </span>
                     </div>
@@ -1881,6 +1941,7 @@ function isEditableTarget(target: EventTarget | null) {
                         locked: row.task.locked,
                         selected: subtask.id === selectedSubtaskId,
                         expanded: isSubtaskExpandedVisible(subtask),
+                        editing: editingSubtaskId === subtask.id,
                         'puzzle-out-right': hasPuzzleOut(row.task, subtask),
                         'puzzle-in-left': hasPuzzleIn(row.task, subtask),
                       }"
@@ -1905,6 +1966,16 @@ function isEditableTarget(target: EventTarget | null) {
                         @keydown.esc.stop.prevent="cancelSubtaskTextEdit"
                         @pointerdown.stop
                       ></textarea>
+                      <button
+                        v-if="editingSubtaskId === subtask.id"
+                        type="button"
+                        class="subtask-edit-save"
+                        title="保存编辑"
+                        @click.stop="finishSubtaskTextEdit"
+                        @pointerdown.stop
+                      >
+                        <Check :size="18" />
+                      </button>
                       <span v-else-if="isSubtaskExpandedVisible(subtask)" class="expanded-subtask-lines">
                         <span class="task-name-line primary-line" :class="{ completed: subtask.completed }">
                           <span class="task-name-text">{{ subtask.name }}</span>
@@ -1949,6 +2020,7 @@ function isEditableTarget(target: EventTarget | null) {
                         />
                       </span>
                       <i
+                        v-if="editingSubtaskId !== subtask.id"
                         class="resize-handle"
                         title="调整工期"
                         @pointerdown.stop="beginSubtaskDrag($event, row.task, subtask, 'resize')"
@@ -2271,7 +2343,7 @@ button.primary {
 
 .task-row {
   position: relative;
-  grid-template-columns: 26px 48px minmax(0, 1fr);
+  grid-template-columns: 26px 48px minmax(0, 1fr) 34px;
 }
 
 .task-row.section-row {
@@ -2388,6 +2460,16 @@ button.primary {
 
 .section-name {
   color: #1d2b3a;
+}
+
+.task-color-input {
+  width: 30px;
+  height: 28px;
+  border: 1px solid #d8dee8;
+  border-radius: 6px;
+  padding: 2px;
+  background: #ffffff;
+  cursor: pointer;
 }
 
 .name-input,
@@ -2517,6 +2599,31 @@ button.primary {
   --row-bg: #eef4ff;
 }
 
+.timeline-row.subtask-drop-target {
+  background: rgba(47, 111, 237, 0.1);
+  outline: 2px solid rgba(47, 111, 237, 0.38);
+  outline-offset: -2px;
+}
+
+.timeline-row.subtask-drop-target::after {
+  content: "移动到此任务";
+  position: absolute;
+  left: 16px;
+  top: 8px;
+  z-index: 8;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  border: 1px solid rgba(47, 111, 237, 0.28);
+  border-radius: 999px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #1f56c7;
+  font-size: 12px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
 .section-timeline-row {
   background: #fbfcfe;
 }
@@ -2556,7 +2663,7 @@ button.primary {
   z-index: 3;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
   height: 30px;
   min-width: 34px;
@@ -2622,6 +2729,11 @@ button.primary {
   padding-bottom: 6px;
 }
 
+.subtask-bar.editing {
+  align-items: stretch;
+  padding: 8px 58px 8px 12px;
+}
+
 .subtask-bar.locked {
   cursor: default;
   opacity: 0.72;
@@ -2636,7 +2748,7 @@ button.primary {
 
 .subtask-bar > .primary-line {
   flex: 1 1 auto;
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 .subtask-meta {
@@ -2768,6 +2880,7 @@ button.primary {
 .subtask-text-editor {
   min-width: 0;
   width: 100%;
+  height: 100%;
   min-height: 58px;
   border: 0;
   border-radius: 5px;
@@ -2778,6 +2891,28 @@ button.primary {
   background: rgba(255, 255, 255, 0.92);
   font-weight: 700;
   line-height: 18px;
+}
+
+.subtask-edit-save {
+  position: absolute;
+  top: 8px;
+  right: 14px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 26px;
+  border: 1px solid #75a85e;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #172033;
+  padding: 0;
+}
+
+.subtask-edit-save:hover {
+  border-color: #5f984b;
+  background: #f8fff4;
 }
 
 .resize-handle {
@@ -2931,7 +3066,7 @@ button.primary {
   }
 
   .task-row {
-    grid-template-columns: 24px 40px minmax(0, 1fr);
+    grid-template-columns: 24px 40px minmax(0, 1fr) 32px;
   }
 
   .task-row.section-row {

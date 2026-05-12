@@ -61,8 +61,8 @@ export const RANGE_YEARS_BEFORE = 5;
 export const RANGE_YEARS_AFTER = 5;
 
 const IGNORED_MERMAID_STATUS_TOKENS = new Set(["active", "done", "crit", "critical", "milestone"]);
-const DEFAULT_TASK_COLOR = "#3867d6";
-const DEFAULT_SUBTASK_COLOR = "#2f6fed";
+const DEFAULT_TASK_COLOR = "#9ac7ff";
+const DEFAULT_SUBTASK_COLOR = "#9ac7ff";
 
 export function todayIso(): string {
   return formatIso(new Date());
@@ -453,9 +453,9 @@ export function createTask(
   index: number,
   start = todayIso(),
   name = `新任务 ${index}`,
-  subtaskNames = [`子任务 ${index}`],
+  subtaskNames: string[] = [],
 ): GanttTask {
-  const color = index === 1 ? DEFAULT_SUBTASK_COLOR : DEFAULT_TASK_COLOR;
+  const color = DEFAULT_TASK_COLOR;
 
   return {
     id: `task-${Date.now().toString(36)}-${index}`,
