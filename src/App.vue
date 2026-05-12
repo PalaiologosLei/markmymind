@@ -1522,6 +1522,18 @@ function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
   };
 }
 
+function shouldHideDraggedSourceSubtask(task: GanttTask, subtask: GanttSubtask) {
+  const drag = dragState.value;
+
+  return (
+    !!drag &&
+    drag.mode === "move" &&
+    !!subtaskDropTargetId.value &&
+    drag.taskId === task.id &&
+    drag.subtaskId === subtask.id
+  );
+}
+
 function subtaskMetaStyle(task: GanttTask, subtask: GanttSubtask) {
   const layout = subtaskLayout(task, subtask);
 
@@ -2103,7 +2115,7 @@ function isEditableTarget(target: EventTarget | null) {
 
                   <template v-for="subtask in row.type === 'task' ? row.task.subtasks : []" :key="subtask.id">
                     <div
-                      v-if="row.type === 'task'"
+                      v-if="row.type === 'task' && !shouldHideDraggedSourceSubtask(row.task, subtask)"
                       class="subtask-meta"
                       :style="subtaskMetaStyle(row.task, subtask)"
                     >
@@ -2143,7 +2155,7 @@ function isEditableTarget(target: EventTarget | null) {
                     </div>
 
                     <div
-                      v-if="row.type === 'task'"
+                      v-if="row.type === 'task' && !shouldHideDraggedSourceSubtask(row.task, subtask)"
                       role="button"
                       tabindex="0"
                       class="subtask-bar"
