@@ -158,6 +158,9 @@ interface AppSettings {
   gridLineWidth: number;
   gridLineColor: string;
   gridLineOpacity: number;
+  timeFlagFormat: "24h" | "12h";
+  taskListLineWidth: number;
+  taskListLineOpacity: number;
   showWeekNumberAxis: boolean;
   firstWeekStart: string;
   workdayBackground: string;
@@ -199,6 +202,9 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   gridLineWidth: 1,
   gridLineColor: "#edf1f5",
   gridLineOpacity: 1,
+  timeFlagFormat: "24h",
+  taskListLineWidth: 1,
+  taskListLineOpacity: 1,
   showWeekNumberAxis: true,
   firstWeekStart: "2026-01-05",
   workdayBackground: "#ffffff",
@@ -233,8 +239,10 @@ const editingSubtaskId = ref<string | null>(null);
 const editingSubtaskText = ref("");
 const subtaskTextEditor = ref<HTMLTextAreaElement | null>(null);
 const copiedSubtask = ref<GanttSubtask | null>(null);
+const currentNow = ref(new Date());
 let syncingVerticalScroll = false;
 let titleRenameTimer: ReturnType<typeof setTimeout> | null = null;
+let clockTimer: ReturnType<typeof setInterval> | null = null;
 
 const scaleOptions: Array<{ value: GanttScale; label: string }> = [
   { value: "day", label: "天" },
@@ -392,6 +400,10 @@ const timelinePaneStyle = computed(() => ({
   "--grid-line-width": `${appSettings.value.gridLineWidth}px`,
   "--grid-line-color": colorWithOpacity(appSettings.value.gridLineColor, appSettings.value.gridLineOpacity),
 }));
+const taskTableStyle = computed(() => ({
+  "--task-list-line-width": `${appSettings.value.taskListLineWidth}px`,
+  "--task-list-line-color": colorWithOpacity("#dbe1ea", appSettings.value.taskListLineOpacity),
+}));
 const weekNumberAxisVisible = computed(
   () =>
     appSettings.value.showWeekNumberAxis &&
@@ -403,6 +415,8 @@ const timelineHeaderHeight = computed(
 const taskHeaderStyle = computed(() => ({
   height: `${timelineHeaderHeight.value}px`,
 }));
+const currentDateIso = computed(() => localDateIso(currentNow.value));
+const currentTimeLabel = computed(() => formatTimeFlag(currentNow.value, appSettings.value.timeFlagFormat));
 const titleModel = computed({
   get: () => doc.value.title,
   set: (value: string) => updateDocumentTitle(value),
@@ -504,14 +518,15 @@ const weekNumberSegments = computed<WeekNumberSegment[]>(() => {
 });
 
 const todayLineStyle = computed(() => {
-  const offset = differenceInDays(visibleStart.value, todayIso());
+  const offset = differenceInDays(visibleStart.value, currentDateIso.value);
 
   if (offset < 0 || offset >= visibleDayCount.value) {
     return { display: "none" };
   }
 
   return {
-    left: `${dateToX(todayIso()) + dayWidth.value / 2}px`,
+    left: `${dateToX(currentDateIso.value) + dayWidth.value * localDayProgress(currentNow.value)}px`,
+    "--timeline-header-height": `${timelineHeaderHeight.value}px`,
   };
 });
 
@@ -532,6 +547,10 @@ watch(
 
 onMounted(async () => {
   window.addEventListener("keydown", handleGlobalKeydown);
+  currentNow.value = new Date();
+  clockTimer = window.setInterval(() => {
+    currentNow.value = new Date();
+  }, 30_000);
 
   const restored = appSettings.value.restoreLastFile ? await restoreLastOpenedFile() : false;
   await nextTick();
@@ -545,6 +564,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleGlobalKeydown);
   if (titleRenameTimer) {
     window.clearTimeout(titleRenameTimer);
+  }
+  if (clockTimer) {
+    window.clearInterval(clockTimer);
   }
 });
 
@@ -2384,6 +2406,35 @@ function formatDisplayDate(iso: string): string {
   ).padStart(2, "0")}`;
 }
 
+function localDateIso(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(
+    2,
+    "0",
+  )}`;
+}
+
+function localDayProgress(date: Date): number {
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+
+  return Math.max(0, Math.min(1, (date.getTime() - start.getTime()) / (end.getTime() - start.getTime())));
+}
+
+function formatTimeFlag(date: Date, format: AppSettings["timeFlagFormat"]): string {
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+
+  if (format === "12h") {
+    const suffix = date.getHours() >= 12 ? "PM" : "AM";
+    const hour = date.getHours() % 12 || 12;
+
+    return `${hour}:${minutes} ${suffix}`;
+  }
+
+  return `${String(date.getHours()).padStart(2, "0")}:${minutes}`;
+}
+
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
@@ -2498,6 +2549,19 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
     gridLineWidth: clampSettingNumber(value.gridLineWidth, 0, 4, DEFAULT_APP_SETTINGS.gridLineWidth),
     gridLineColor: normalizeColor(value.gridLineColor, DEFAULT_APP_SETTINGS.gridLineColor),
     gridLineOpacity: clampSettingNumber(value.gridLineOpacity, 0, 1, DEFAULT_APP_SETTINGS.gridLineOpacity),
+    timeFlagFormat: value.timeFlagFormat === "12h" ? "12h" : DEFAULT_APP_SETTINGS.timeFlagFormat,
+    taskListLineWidth: clampSettingNumber(
+      value.taskListLineWidth,
+      0,
+      4,
+      DEFAULT_APP_SETTINGS.taskListLineWidth,
+    ),
+    taskListLineOpacity: clampSettingNumber(
+      value.taskListLineOpacity,
+      0,
+      1,
+      DEFAULT_APP_SETTINGS.taskListLineOpacity,
+    ),
     showWeekNumberAxis: value.showWeekNumberAxis !== false,
     firstWeekStart: typeof value.firstWeekStart === "string" ? startOfWeek(value.firstWeekStart) : DEFAULT_APP_SETTINGS.firstWeekStart,
     workdayBackground: normalizeColor(value.workdayBackground, DEFAULT_APP_SETTINGS.workdayBackground),
@@ -2613,6 +2677,7 @@ function isEditableTarget(target: EventTarget | null) {
           <aside
             ref="taskTablePane"
             class="task-table"
+            :style="taskTableStyle"
             @scroll="syncTaskTableScroll"
             @wheel.prevent="scrollTaskTableWheel"
             @contextmenu.prevent="openTaskListBlankMenu"
@@ -2735,6 +2800,10 @@ function isEditableTarget(target: EventTarget | null) {
                 </div>
               </div>
 
+              <div class="today-line" :style="todayLineStyle">
+                <span class="today-time-flag">{{ currentTimeLabel }}</span>
+              </div>
+
               <div class="timeline-body">
                 <div
                   v-for="row in taskListRows"
@@ -2749,7 +2818,6 @@ function isEditableTarget(target: EventTarget | null) {
                   @click="row.type === 'task' && selectTask(row.task)"
                   @contextmenu="row.type === 'task' && openContextMenu($event, row.task)"
                 >
-                  <div class="today-line" :style="todayLineStyle"></div>
                   <div v-for="segment in unitSegments" :key="`${row.key}-${segment.key}`" class="grid-unit" :style="timeCellStyle(segment)"></div>
 
                   <div v-if="row.type === 'section'" class="section-timeline-label">
@@ -3102,6 +3170,13 @@ function isEditableTarget(target: EventTarget | null) {
               <span>网格线颜色</span>
               <input v-model="appSettings.gridLineColor" type="color" />
             </label>
+            <label class="settings-row">
+              <span>当前时间格式</span>
+              <select v-model="appSettings.timeFlagFormat">
+                <option value="24h">24 小时</option>
+                <option value="12h">12 小时</option>
+              </select>
+            </label>
             <label class="settings-toggle">
               <input v-model="appSettings.showWeekNumberAxis" type="checkbox" />
               <span>显示周数轴</span>
@@ -3125,6 +3200,18 @@ function isEditableTarget(target: EventTarget | null) {
             <label class="settings-row">
               <span>周末背景色</span>
               <input v-model="appSettings.weekendBackground" type="color" />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <h3>主任务列表</h3>
+            <label class="settings-row">
+              <span>线框粗细</span>
+              <input v-model.number="appSettings.taskListLineWidth" type="number" min="0" max="4" step="0.5" />
+            </label>
+            <label class="settings-row">
+              <span>线框透明度</span>
+              <input v-model.number="appSettings.taskListLineOpacity" type="number" min="0" max="1" step="0.05" />
             </label>
           </section>
 
@@ -3416,9 +3503,11 @@ button.primary {
 }
 
 .task-table {
+  --task-list-line-width: 1px;
+  --task-list-line-color: #dbe1ea;
   min-width: 0;
   overflow: hidden;
-  border-right: 1px solid #dbe1ea;
+  border-right: var(--task-list-line-width) solid var(--task-list-line-color);
   background: #ffffff;
 }
 
@@ -3448,7 +3537,7 @@ button.primary {
   z-index: 5;
   height: 76px;
   padding: 0 12px;
-  border-bottom: 1px solid #dbe1ea;
+  border-bottom: var(--task-list-line-width) solid var(--task-list-line-color);
   color: #6c7581;
   background: #ffffff;
   font-size: 13px;
@@ -3457,7 +3546,7 @@ button.primary {
 
 .task-row {
   padding: 8px 12px;
-  border-bottom: 1px solid #edf1f5;
+  border-bottom: var(--task-list-line-width) solid var(--task-list-line-color);
 }
 
 .task-row.selected {
@@ -3528,8 +3617,8 @@ button.primary {
   left: 12px;
   top: 50%;
   width: 12px;
-  height: 1px;
-  background: #c5ced9;
+  height: var(--task-list-line-width);
+  background: var(--task-list-line-color);
 }
 
 .task-indent.nested::after {
@@ -3538,8 +3627,8 @@ button.primary {
   left: 12px;
   top: 8px;
   bottom: 50%;
-  width: 1px;
-  background: #c5ced9;
+  width: var(--task-list-line-width);
+  background: var(--task-list-line-color);
 }
 
 .drag-handle,
@@ -3573,7 +3662,7 @@ button.primary {
 }
 
 .section-row.collapsed {
-  border-bottom-color: #dbe1ea;
+  border-bottom-color: var(--task-list-line-color);
 }
 
 .section-name {
@@ -3817,12 +3906,32 @@ button.primary {
 
 .today-line {
   position: absolute;
-  top: 0;
+  top: var(--timeline-header-height);
   bottom: 0;
-  z-index: 2;
+  z-index: 7;
   width: 2px;
+  transform: translateX(-1px);
   background: #5b7cfa;
   pointer-events: none;
+}
+
+.today-time-flag {
+  position: sticky;
+  top: calc(var(--timeline-header-height) + 4px);
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  border: 1px solid #0d4e89;
+  border-radius: 5px;
+  padding: 0 4px;
+  transform: translateX(-50%);
+  background: #0875c9;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(22, 35, 52, 0.22);
 }
 
 .subtask-bar {
@@ -4280,7 +4389,8 @@ button.primary {
 }
 
 .settings-row input[type="number"],
-.settings-row input[type="color"] {
+.settings-row input[type="color"],
+.settings-row select {
   width: 100%;
   height: 30px;
   border: 1px solid #d8dee8;
@@ -4289,7 +4399,8 @@ button.primary {
   color: #27313d;
 }
 
-.settings-row input[type="number"] {
+.settings-row input[type="number"],
+.settings-row select {
   padding: 0 8px;
 }
 
