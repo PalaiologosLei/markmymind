@@ -103,6 +103,12 @@ interface TaskListDropTarget {
   sectionId?: string;
 }
 
+interface SubtaskLayout {
+  left: number;
+  width: number;
+  height: number;
+}
+
 interface UnitSegment {
   key: string;
   label: string;
@@ -111,8 +117,11 @@ interface UnitSegment {
   days: number;
 }
 
-const TASK_ROW_HEIGHT = 72;
+const TASK_ROW_HEIGHT = 82;
 const SECTION_ROW_HEIGHT = 44;
+const SUBTASK_BAR_TOP = 38;
+const SUBTASK_META_TOP = 9;
+const SUBTASK_ROW_BOTTOM = 12;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
@@ -1363,13 +1372,24 @@ function contextSubtask() {
 
 function subtaskBarStyle(task: GanttTask, subtask: GanttSubtask) {
   const layout = subtaskLayout(task, subtask);
+  const color = subtask.color || task.color || DEFAULT_BAR_COLOR;
 
   return {
     left: `${layout.left}px`,
-    top: "12px",
+    top: `${SUBTASK_BAR_TOP}px`,
     width: `${layout.width}px`,
     height: `${layout.height}px`,
-    background: subtask.color || task.color || DEFAULT_BAR_COLOR,
+    background: color,
+    "--bar-color": color,
+  };
+}
+
+function subtaskMetaStyle(task: GanttTask, subtask: GanttSubtask) {
+  const layout = subtaskLayout(task, subtask);
+
+  return {
+    left: `${layout.left}px`,
+    top: `${SUBTASK_META_TOP}px`,
   };
 }
 
@@ -1392,7 +1412,7 @@ function taskRowHeight(task: GanttTask) {
     TASK_ROW_HEIGHT,
     ...task.subtasks.map((subtask) => {
       const layout = subtaskLayout(task, subtask);
-      return layout.height + 24;
+      return layout.height + SUBTASK_BAR_TOP + SUBTASK_ROW_BOTTOM;
     }),
   );
 }
@@ -1407,26 +1427,56 @@ function subtaskLayout(task: GanttTask, target: GanttSubtask) {
 }
 
 function subtaskLayouts(task: GanttTask) {
-  const layouts = new Map<string, { left: number; width: number; height: number }>();
+  const layouts = new Map<string, SubtaskLayout>();
   const ordered = [...task.subtasks].sort((first, second) => {
     const dateOrder = first.start.localeCompare(second.start);
     return dateOrder || task.subtasks.indexOf(first) - task.subtasks.indexOf(second);
   });
   let cursor = Number.NEGATIVE_INFINITY;
+  let previous: GanttSubtask | null = null;
 
   ordered.forEach((subtask) => {
     const width = renderedSubtaskWidth(subtask);
     const naturalLeft = dateToX(subtask.start);
-    const left = Math.max(naturalLeft, cursor + 6);
+    const gap = previous && isPuzzleConnection(previous, subtask) ? 0 : 6;
+    const left = Math.max(naturalLeft, cursor + gap);
     layouts.set(subtask.id, {
       left,
       width,
       height: renderedSubtaskHeight(subtask, width),
     });
     cursor = left + width;
+    previous = subtask;
   });
 
   return layouts;
+}
+
+function hasPuzzleOut(task: GanttTask, subtask: GanttSubtask) {
+  const ordered = orderedSubtasksForPuzzle(task);
+  const index = ordered.findIndex((item) => item.id === subtask.id);
+  return index >= 0 && index < ordered.length - 1 && isPuzzleConnection(subtask, ordered[index + 1]);
+}
+
+function hasPuzzleIn(task: GanttTask, subtask: GanttSubtask) {
+  const ordered = orderedSubtasksForPuzzle(task);
+  const index = ordered.findIndex((item) => item.id === subtask.id);
+  return index > 0 && isPuzzleConnection(ordered[index - 1], subtask);
+}
+
+function orderedSubtasksForPuzzle(task: GanttTask) {
+  return [...task.subtasks].sort((first, second) => {
+    const dateOrder = first.start.localeCompare(second.start);
+    return dateOrder || task.subtasks.indexOf(first) - task.subtasks.indexOf(second);
+  });
+}
+
+function isPuzzleConnection(left: GanttSubtask, right: GanttSubtask) {
+  return canRenderPuzzleConnections() && endDate(left) === right.start;
+}
+
+function canRenderPuzzleConnections() {
+  return doc.value.view === "day" || doc.value.view === "week" || doc.value.view === "month";
 }
 
 function baseSubtaskWidth(subtask: GanttSubtask) {
@@ -1788,56 +1838,73 @@ function isEditableTarget(target: EventTarget | null) {
                     {{ row.section.name }}
                   </div>
 
-                  <div
-                    v-for="subtask in row.type === 'task' ? row.task.subtasks : []"
-                    :key="subtask.id"
-                    role="button"
-                    tabindex="0"
-                    class="subtask-bar"
-                    :class="{ locked: row.type === 'task' && row.task.locked, selected: subtask.id === selectedSubtaskId, expanded: isSubtaskExpandedVisible(subtask) }"
-                    :style="row.type === 'task' ? subtaskBarStyle(row.task, subtask) : {}"
-                    :title="row.type === 'task' ? `${row.task.name} / ${subtask.name}: ${subtask.start} - ${endDate(subtask)}` : ''"
-                    @click.stop="row.type === 'task' && selectSubtask(row.task, subtask)"
-                    @dblclick.stop="row.type === 'task' && startSubtaskTextEdit(row.task, subtask)"
-                    @contextmenu.stop="row.type === 'task' && openContextMenu($event, row.task, subtask)"
-                    @pointerdown="row.type === 'task' && beginSubtaskDrag($event, row.task, subtask, 'move')"
-                  >
-                    <button
-                      type="button"
-                      class="fold-button"
-                      :class="{ disabled: !subtask.children.length }"
-                      :title="subtask.expanded ? '折叠' : '展开'"
-                      @click.stop="row.type === 'task' && toggleSubtaskExpanded(row.task, subtask)"
-                      @pointerdown.stop
+                  <template v-for="subtask in row.type === 'task' ? row.task.subtasks : []" :key="subtask.id">
+                    <div
+                      v-if="row.type === 'task'"
+                      class="subtask-meta"
+                      :style="subtaskMetaStyle(row.task, subtask)"
                     >
-                      {{ subtask.expanded && subtask.children.length ? "v" : ">" }}
-                    </button>
-                    <textarea
-                      v-if="editingSubtaskId === subtask.id"
-                      ref="subtaskTextEditor"
-                      v-model="editingSubtaskText"
-                      class="subtask-text-editor"
-                      aria-label="子任务局部编辑"
-                      @blur="finishSubtaskTextEdit"
-                      @click.stop
-                      @dblclick.stop
-                      @keydown.ctrl.enter.stop.prevent="finishSubtaskTextEdit"
-                      @keydown.meta.enter.stop.prevent="finishSubtaskTextEdit"
-                      @keydown.esc.stop.prevent="cancelSubtaskTextEdit"
-                      @pointerdown.stop
-                    ></textarea>
-                    <span v-else-if="isSubtaskExpandedVisible(subtask)" class="expanded-subtask-lines">
-                      <span class="primary-line">{{ subtask.name }}</span>
-                      <span v-for="child in subtask.children" :key="child.id" class="secondary-line">{{ child.name }}</span>
-                    </span>
-                    <span v-else class="primary-line">{{ subtask.name }}</span>
-                    <span v-if="!isSubtaskExpandedVisible(subtask) && subtask.duration >= 3" class="duration-label">{{ subtask.duration }} 天</span>
-                    <i
-                      class="resize-handle"
-                      title="调整工期"
-                      @pointerdown.stop="row.type === 'task' && beginSubtaskDrag($event, row.task, subtask, 'resize')"
-                    ></i>
-                  </div>
+                      <button
+                        type="button"
+                        class="fold-button"
+                        :class="{ disabled: !subtask.children.length }"
+                        :title="subtask.expanded ? '折叠' : '展开'"
+                        @click.stop="toggleSubtaskExpanded(row.task, subtask)"
+                        @pointerdown.stop
+                      >
+                        <ChevronDown v-if="subtask.expanded && subtask.children.length" :size="16" />
+                        <ChevronRight v-else :size="16" />
+                      </button>
+                      <span v-if="!isSubtaskExpandedVisible(subtask) && subtask.duration >= 3" class="duration-label">
+                        {{ subtask.duration }} 天
+                      </span>
+                    </div>
+
+                    <div
+                      v-if="row.type === 'task'"
+                      role="button"
+                      tabindex="0"
+                      class="subtask-bar"
+                      :class="{
+                        locked: row.task.locked,
+                        selected: subtask.id === selectedSubtaskId,
+                        expanded: isSubtaskExpandedVisible(subtask),
+                        'puzzle-out-right': hasPuzzleOut(row.task, subtask),
+                        'puzzle-in-left': hasPuzzleIn(row.task, subtask),
+                      }"
+                      :style="subtaskBarStyle(row.task, subtask)"
+                      :title="`${row.task.name} / ${subtask.name}: ${subtask.start} - ${endDate(subtask)}`"
+                      @click.stop="selectSubtask(row.task, subtask)"
+                      @dblclick.stop="startSubtaskTextEdit(row.task, subtask)"
+                      @contextmenu.stop="openContextMenu($event, row.task, subtask)"
+                      @pointerdown="beginSubtaskDrag($event, row.task, subtask, 'move')"
+                    >
+                      <textarea
+                        v-if="editingSubtaskId === subtask.id"
+                        ref="subtaskTextEditor"
+                        v-model="editingSubtaskText"
+                        class="subtask-text-editor"
+                        aria-label="子任务局部编辑"
+                        @blur="finishSubtaskTextEdit"
+                        @click.stop
+                        @dblclick.stop
+                        @keydown.ctrl.enter.stop.prevent="finishSubtaskTextEdit"
+                        @keydown.meta.enter.stop.prevent="finishSubtaskTextEdit"
+                        @keydown.esc.stop.prevent="cancelSubtaskTextEdit"
+                        @pointerdown.stop
+                      ></textarea>
+                      <span v-else-if="isSubtaskExpandedVisible(subtask)" class="expanded-subtask-lines">
+                        <span class="primary-line">{{ subtask.name }}</span>
+                        <span v-for="child in subtask.children" :key="child.id" class="secondary-line">{{ child.name }}</span>
+                      </span>
+                      <span v-else class="primary-line">{{ subtask.name }}</span>
+                      <i
+                        class="resize-handle"
+                        title="调整工期"
+                        @pointerdown.stop="beginSubtaskDrag($event, row.task, subtask, 'resize')"
+                      ></i>
+                    </div>
+                  </template>
                 </div>
               </div>
             </div>
@@ -2380,10 +2447,12 @@ button.primary {
   display: flex;
   border-bottom: 1px solid #edf1f5;
   overflow: hidden;
+  --row-bg: #ffffff;
 }
 
 .timeline-row.selected {
   background: rgba(47, 111, 237, 0.07);
+  --row-bg: #eef4ff;
 }
 
 .section-timeline-row {
@@ -2421,23 +2490,58 @@ button.primary {
 
 .subtask-bar {
   position: absolute;
+  --puzzle-radius: 8px;
   z-index: 3;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 8px;
   height: 30px;
   min-width: 34px;
-  overflow: hidden;
+  overflow: visible;
   border: 0;
   border-radius: 7px;
   color: #ffffff;
-  padding: 0 24px 0 11px;
+  padding: 0 24px 0 14px;
   font-size: 13px;
   font-weight: 700;
   box-shadow: 0 1px 2px rgba(22, 35, 52, 0.18);
   touch-action: none;
   cursor: grab;
+}
+
+.subtask-bar.puzzle-out-right {
+  z-index: 4;
+}
+
+.subtask-bar.puzzle-out-right::after {
+  content: "";
+  position: absolute;
+  top: calc((30px - var(--puzzle-radius) * 2) / 2);
+  right: calc(var(--puzzle-radius) * -0.72);
+  width: calc(var(--puzzle-radius) * 2);
+  height: calc(var(--puzzle-radius) * 2);
+  border-radius: 999px;
+  background: var(--bar-color);
+  box-shadow: 1px 0 1px rgba(22, 35, 52, 0.08);
+  pointer-events: none;
+}
+
+.subtask-bar.puzzle-in-left {
+  -webkit-mask-image: radial-gradient(
+    circle var(--puzzle-radius) at 0 15px,
+    transparent 0 calc(var(--puzzle-radius) - 0.5px),
+    #000 var(--puzzle-radius)
+  );
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  mask-image: radial-gradient(
+    circle var(--puzzle-radius) at 0 15px,
+    transparent 0 calc(var(--puzzle-radius) - 0.5px),
+    #000 var(--puzzle-radius)
+  );
+  mask-repeat: no-repeat;
+  mask-size: 100% 100%;
 }
 
 .subtask-bar:hover {
@@ -2447,6 +2551,7 @@ button.primary {
 .subtask-bar.selected {
   outline: 2px solid rgba(38, 94, 210, 0.34);
   outline-offset: 1px;
+  z-index: 5;
 }
 
 .subtask-bar.expanded {
@@ -2467,24 +2572,47 @@ button.primary {
   white-space: nowrap;
 }
 
+.subtask-bar > .primary-line {
+  flex: 1 1 auto;
+  text-align: center;
+}
+
+.subtask-meta {
+  position: absolute;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  pointer-events: none;
+}
+
 .fold-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 22px;
   border: 0;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.22);
-  color: #ffffff;
+  border-radius: 6px;
+  background: transparent;
+  color: #4c5561;
   padding: 0;
-  font-size: 12px;
-  font-weight: 800;
+  pointer-events: auto;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.fold-button:hover {
+  background: #eef2f6;
+  color: #1f2937;
 }
 
 .fold-button.disabled {
-  opacity: 0.35;
+  opacity: 0.42;
 }
 
 .expanded-subtask-lines {
@@ -2510,7 +2638,19 @@ button.primary {
 }
 
 .duration-label {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
   flex: 0 0 auto;
+  border: 1px solid #75a85e;
+  border-radius: 6px;
+  padding: 0 7px;
+  background: #ffffff;
+  color: #24303d;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1;
+  box-shadow: 0 1px 1px rgba(22, 35, 52, 0.06);
 }
 
 .subtask-text-editor {
