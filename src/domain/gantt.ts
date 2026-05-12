@@ -6,6 +6,7 @@ export interface GanttSubtask {
   start: string;
   duration: number;
   color: string;
+  completed: boolean;
   expanded: boolean;
   children: GanttSecondLevelSubtask[];
 }
@@ -13,6 +14,7 @@ export interface GanttSubtask {
 export interface GanttSecondLevelSubtask {
   id: string;
   name: string;
+  completed: boolean;
 }
 
 export interface GanttTask {
@@ -53,7 +55,7 @@ export interface GanttParseResult {
   warnings: string[];
 }
 
-export const MARKMYMIND_SCHEMA = "markmymind.gantt/v4";
+export const MARKMYMIND_SCHEMA = "markmymind.gantt/v5";
 export const DAY_MS = 86_400_000;
 export const RANGE_YEARS_BEFORE = 5;
 export const RANGE_YEARS_AFTER = 5;
@@ -343,6 +345,7 @@ export function parseGanttSource(source: string): GanttParseResult {
       return {
         ...subtask,
         children,
+        completed: subtaskMeta?.completed === true || subtask.completed === true,
         expanded: children.length > 0 && subtaskMeta?.expanded === true,
         color:
           typeof subtaskMeta?.color === "string" && subtaskMeta.color
@@ -362,7 +365,7 @@ export function parseGanttSource(source: string): GanttParseResult {
 export function serializeGanttDocument(doc: GanttDocument): string {
   const lines = [
     "gantt",
-    `    %% markmymind:gantt ${JSON.stringify({ schema: MARKMYMIND_SCHEMA, version: 3, view: doc.view })}`,
+    `    %% markmymind:gantt ${JSON.stringify({ schema: MARKMYMIND_SCHEMA, version: 5, view: doc.view })}`,
     ...doc.directives.map((line) => `    ${line.trim()}`),
     `    title ${sanitizeLine(doc.title || "未命名甘特图")}`,
     `    dateFormat ${doc.dateFormat || "YYYY-MM-DD"}`,
@@ -399,6 +402,7 @@ export function serializeGanttDocument(doc: GanttDocument): string {
           id: subtask.id,
           taskId: task.id,
           color: subtask.color || task.color || DEFAULT_SUBTASK_COLOR,
+          completed: subtask.completed,
           expanded: subtask.children.length > 0 && subtask.expanded,
           children: subtask.children,
         })}`,
@@ -478,6 +482,7 @@ export function createSubtask(
     start,
     duration: 3,
     color,
+    completed: false,
     expanded: false,
     children: [],
   };
@@ -577,6 +582,7 @@ function parseTaskLine(line: string, sectionId: string, fallbackIndex: number): 
             start: start || todayIso(),
             duration,
             color,
+            completed: false,
             expanded: false,
             children: [],
           },
@@ -619,6 +625,7 @@ function parseSubtaskLine(
       start,
       duration,
       color: DEFAULT_SUBTASK_COLOR,
+      completed: false,
       expanded: false,
       children: [],
     },
@@ -694,8 +701,13 @@ function normalizeDocumentStructure(doc: GanttDocument) {
       ...subtask,
       duration: normalizeDuration(subtask.duration),
       color: subtask.color || task.color || DEFAULT_SUBTASK_COLOR,
+      completed: subtask.completed === true,
       expanded: subtask.children.length > 0 && subtask.expanded === true,
-      children: subtask.children,
+      children: subtask.children.map((child, childIndex) => ({
+        id: child.id || `child-${childIndex + 1}`,
+        name: child.name,
+        completed: child.completed === true,
+      })),
     })),
   }));
 
@@ -779,7 +791,7 @@ function readSecondLevelSubtasks(value: unknown): GanttSecondLevelSubtask[] {
   return value
     .map((item, index) => {
       if (typeof item === "string") {
-        return { id: `child-${index + 1}`, name: sanitizeLine(item) };
+        return { id: `child-${index + 1}`, name: sanitizeLine(item), completed: false };
       }
 
       if (!item || typeof item !== "object") {
@@ -796,6 +808,7 @@ function readSecondLevelSubtasks(value: unknown): GanttSecondLevelSubtask[] {
       return {
         id: typeof record.id === "string" && record.id ? record.id : `child-${index + 1}`,
         name,
+        completed: record.completed === true,
       };
     })
     .filter((item): item is GanttSecondLevelSubtask => Boolean(item));

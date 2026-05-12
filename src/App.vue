@@ -37,6 +37,7 @@ import {
   type GanttDocument,
   type GanttSection,
   type GanttScale,
+  type GanttSecondLevelSubtask,
   type GanttSubtask,
   type GanttTask,
 } from "./domain/gantt";
@@ -563,10 +564,12 @@ function pasteCopiedSubtask() {
     source.color || targetTask.color,
   );
   subtask.duration = normalizeDuration(source.duration);
+  subtask.completed = source.completed;
   subtask.expanded = source.children.length > 0 && source.expanded;
   subtask.children = source.children.map((child, index) => ({
     id: createSecondLevelId(subtask.id, index),
     name: child.name,
+    completed: child.completed,
   }));
   targetTask.subtasks.push(subtask);
   selectSubtask(targetTask, subtask);
@@ -849,8 +852,17 @@ function applySubtaskLocalText(subtask: GanttSubtask, text: string) {
   subtask.children = childNames.map((name, index) => ({
     id: subtask.children[index]?.id ?? createSecondLevelId(subtask.id, index),
     name,
+    completed: subtask.children[index]?.completed ?? false,
   }));
   subtask.expanded = subtask.children.length > 0;
+}
+
+function setSubtaskCompleted(subtask: GanttSubtask, event: Event) {
+  subtask.completed = (event.target as HTMLInputElement).checked;
+}
+
+function setSecondLevelCompleted(child: GanttSecondLevelSubtask, event: Event) {
+  child.completed = (event.target as HTMLInputElement).checked;
 }
 
 function createSecondLevelId(subtaskId: string, index: number) {
@@ -1497,7 +1509,7 @@ function renderedSubtaskHeight(subtask: GanttSubtask, width: number) {
     return 30;
   }
 
-  const lineCount = expandedSubtaskLines(subtask).reduce((total, line) => total + wrappedLineCount(line, width - 30), 0);
+  const lineCount = expandedSubtaskLines(subtask).reduce((total, line) => total + wrappedLineCount(line, width - 58), 0);
   return Math.max(34, EXPANDED_VERTICAL_PADDING + lineCount * EXPANDED_LINE_HEIGHT);
 }
 
@@ -1894,10 +1906,48 @@ function isEditableTarget(target: EventTarget | null) {
                         @pointerdown.stop
                       ></textarea>
                       <span v-else-if="isSubtaskExpandedVisible(subtask)" class="expanded-subtask-lines">
-                        <span class="primary-line">{{ subtask.name }}</span>
-                        <span v-for="child in subtask.children" :key="child.id" class="secondary-line">{{ child.name }}</span>
+                        <span class="task-name-line primary-line" :class="{ completed: subtask.completed }">
+                          <span class="task-name-text">{{ subtask.name }}</span>
+                          <input
+                            class="completion-checkbox"
+                            type="checkbox"
+                            :checked="subtask.completed"
+                            aria-label="标记一级子任务完成"
+                            @change="setSubtaskCompleted(subtask, $event)"
+                            @click.stop
+                            @pointerdown.stop
+                          />
+                        </span>
+                        <span
+                          v-for="child in subtask.children"
+                          :key="child.id"
+                          class="task-name-line secondary-line"
+                          :class="{ completed: child.completed }"
+                        >
+                          <span class="task-name-text">{{ child.name }}</span>
+                          <input
+                            class="completion-checkbox"
+                            type="checkbox"
+                            :checked="child.completed"
+                            aria-label="标记二级子任务完成"
+                            @change="setSecondLevelCompleted(child, $event)"
+                            @click.stop
+                            @pointerdown.stop
+                          />
+                        </span>
                       </span>
-                      <span v-else class="primary-line">{{ subtask.name }}</span>
+                      <span v-else class="task-name-line primary-line" :class="{ completed: subtask.completed }">
+                        <span class="task-name-text">{{ subtask.name }}</span>
+                        <input
+                          class="completion-checkbox"
+                          type="checkbox"
+                          :checked="subtask.completed"
+                          aria-label="标记一级子任务完成"
+                          @change="setSubtaskCompleted(subtask, $event)"
+                          @click.stop
+                          @pointerdown.stop
+                        />
+                      </span>
                       <i
                         class="resize-handle"
                         title="调整工期"
@@ -1999,6 +2049,13 @@ function isEditableTarget(target: EventTarget | null) {
   box-sizing: border-box;
 }
 
+html,
+body,
+#app {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   min-width: 980px;
@@ -2039,8 +2096,10 @@ button.primary {
 
 .app-shell {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .topbar {
@@ -2123,6 +2182,7 @@ button.primary {
   grid-template-columns: minmax(0, 1fr);
   min-height: 0;
   flex: 1;
+  overflow: hidden;
 }
 
 .workspace.with-source {
@@ -2134,6 +2194,7 @@ button.primary {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
+  overflow: hidden;
   background: #f8fafc;
 }
 
@@ -2186,6 +2247,7 @@ button.primary {
   grid-template-columns: 320px minmax(0, 1fr);
   min-height: 0;
   flex: 1;
+  overflow: hidden;
   border-bottom: 1px solid #dbe1ea;
 }
 
@@ -2574,7 +2636,7 @@ button.primary {
 
 .subtask-bar > .primary-line {
   flex: 1 1 auto;
-  text-align: center;
+  justify-content: center;
 }
 
 .subtask-meta {
@@ -2625,6 +2687,46 @@ button.primary {
   white-space: normal !important;
 }
 
+.task-name-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.task-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-name-line.completed .task-name-text {
+  opacity: 0.78;
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+.completion-checkbox {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin: 0;
+  border-radius: 4px;
+  opacity: 0;
+  accent-color: #55c979;
+  cursor: pointer;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.task-name-line:hover .completion-checkbox,
+.completion-checkbox:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .primary-line,
 .secondary-line {
   line-height: 18px;
@@ -2635,6 +2737,16 @@ button.primary {
 .secondary-line {
   opacity: 0.88;
   font-weight: 600;
+}
+
+.secondary-line::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.95;
 }
 
 .duration-label {
