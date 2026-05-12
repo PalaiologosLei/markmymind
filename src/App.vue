@@ -3763,7 +3763,7 @@ button.primary {
 .unit-row {
   display: flex;
   position: sticky;
-  z-index: 4;
+  z-index: 12;
   background: #ffffff;
 }
 
@@ -3782,7 +3782,7 @@ button.primary {
 .week-number-row {
   position: sticky;
   top: 38px;
-  z-index: 4;
+  z-index: 12;
   display: flex;
   height: 38px;
   border-bottom: var(--grid-line-width) solid var(--grid-line-color);
