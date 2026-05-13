@@ -122,6 +122,19 @@ interface ConfirmDialogState {
   onConfirm: () => void;
 }
 
+interface DocumentTab {
+  id: string;
+  doc: GanttDocument;
+  path: string | null;
+  lastSavedSource: string;
+  selectedTaskId: string;
+  selectedSubtaskId: string;
+  warnings: string[];
+  undoStack: string[];
+  ignoredHistoryTarget: string | null;
+  sourceDraft: string;
+}
+
 type TaskListRow =
   | {
       type: "section";
@@ -213,6 +226,8 @@ const LINK_ROW_GAP = SUBTASK_META_HEIGHT + SUBTASK_META_BAR_GAP + 4;
 const EXPANDED_LINE_HEIGHT = 22;
 const EXPANDED_VERTICAL_PADDING = 18;
 const LAST_FILE_PATH_KEY = "markmymind:lastFilePath";
+const LAST_FILE_PATHS_KEY = "markmymind:lastFilePaths";
+const LAST_ACTIVE_FILE_PATH_KEY = "markmymind:lastActiveFilePath";
 const APP_SETTINGS_KEY = "markmymind:settings";
 const DEFAULT_BAR_COLOR = "#9ac7ff";
 const TIMELINE_HEADER_ROW_HEIGHT = 38;
@@ -246,17 +261,57 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   defaultSubtaskDuration: 1,
 };
 
-const doc = ref<GanttDocument>(createBlankDocument());
+let tabIdSeed = 0;
+const initialTab = createDocumentTab(createBlankDocument());
+const tabs = ref<DocumentTab[]>([initialTab]);
+const activeTabId = ref(initialTab.id);
+const activeTab = computed<DocumentTab>(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? tabs.value[0]);
+const doc = computed<GanttDocument>({
+  get: () => activeTab.value.doc,
+  set: (value) => {
+    activeTab.value.doc = value;
+  },
+});
 const appSettings = ref<AppSettings>(loadAppSettings());
-const currentPath = ref<string | null>(null);
-const lastSavedSource = ref(serializeGanttDocument(doc.value));
-const selectedTaskId = ref(doc.value.tasks[0]?.id ?? "");
-const selectedSubtaskId = ref(doc.value.tasks[0]?.subtasks[0]?.id ?? "");
+const currentPath = computed<string | null>({
+  get: () => activeTab.value.path,
+  set: (value) => {
+    activeTab.value.path = value;
+  },
+});
+const lastSavedSource = computed<string>({
+  get: () => activeTab.value.lastSavedSource,
+  set: (value) => {
+    activeTab.value.lastSavedSource = value;
+  },
+});
+const selectedTaskId = computed<string>({
+  get: () => activeTab.value.selectedTaskId,
+  set: (value) => {
+    activeTab.value.selectedTaskId = value;
+  },
+});
+const selectedSubtaskId = computed<string>({
+  get: () => activeTab.value.selectedSubtaskId,
+  set: (value) => {
+    activeTab.value.selectedSubtaskId = value;
+  },
+});
 const statusMessage = ref("已创建新甘特图");
-const warnings = ref<string[]>([]);
+const warnings = computed<string[]>({
+  get: () => activeTab.value.warnings,
+  set: (value) => {
+    activeTab.value.warnings = value;
+  },
+});
 const sourcePanelOpen = ref(false);
 const settingsPanelOpen = ref(false);
-const sourceDraft = ref("");
+const sourceDraft = computed<string>({
+  get: () => activeTab.value.sourceDraft,
+  set: (value) => {
+    activeTab.value.sourceDraft = value;
+  },
+});
 const dragState = ref<DragState | null>(null);
 const subtaskDropTargetId = ref<string | null>(null);
 const panState = ref<PanState | null>(null);
@@ -274,13 +329,17 @@ const editingSubtaskText = ref("");
 const subtaskTextEditor = ref<HTMLTextAreaElement | null>(null);
 const copiedSubtask = ref<GanttSubtask | null>(null);
 const currentNow = ref(new Date());
-const undoStack = ref<string[]>([]);
+const undoStack = computed<string[]>({
+  get: () => activeTab.value.undoStack,
+  set: (value) => {
+    activeTab.value.undoStack = value;
+  },
+});
 const lastPointerPosition = ref({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
 let syncingVerticalScroll = false;
-let titleRenameTimer: ReturnType<typeof setTimeout> | null = null;
+const titleRenameTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let clockTimer: ReturnType<typeof setInterval> | null = null;
 let suppressHistory = false;
-let ignoredHistoryTarget: string | null = null;
 let closeUnlisten: (() => void) | null = null;
 let closingAfterPrompt = false;
 
@@ -300,6 +359,26 @@ const weekdayOptions = [
   { value: 6, label: "周六" },
   { value: 0, label: "周日" },
 ];
+
+function createDocumentTab(
+  document: GanttDocument,
+  options: { path?: string | null; warnings?: string[]; lastSavedSource?: string } = {},
+): DocumentTab {
+  const source = options.lastSavedSource ?? serializeGanttDocument(document);
+
+  return {
+    id: `tab-${Date.now().toString(36)}-${++tabIdSeed}`,
+    doc: document,
+    path: options.path ?? null,
+    lastSavedSource: source,
+    selectedTaskId: document.tasks[0]?.id ?? "",
+    selectedSubtaskId: document.tasks[0]?.subtasks[0]?.id ?? "",
+    warnings: options.warnings ?? [],
+    undoStack: [],
+    ignoredHistoryTarget: null,
+    sourceDraft: source,
+  };
+}
 
 const sourceText = computed(() => serializeGanttDocument(doc.value));
 const isDirty = computed(() => sourceText.value !== lastSavedSource.value);
@@ -608,8 +687,8 @@ watch(
 );
 
 watch(sourceText, (next, previous) => {
-  if (next === ignoredHistoryTarget) {
-    ignoredHistoryTarget = null;
+  if (next === activeTab.value.ignoredHistoryTarget) {
+    activeTab.value.ignoredHistoryTarget = null;
     return;
   }
 
@@ -645,9 +724,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleGlobalKeydown);
   window.removeEventListener("pointermove", updateLastPointerPosition);
   closeUnlisten?.();
-  if (titleRenameTimer) {
-    window.clearTimeout(titleRenameTimer);
-  }
+  titleRenameTimers.forEach((timer) => window.clearTimeout(timer));
+  titleRenameTimers.clear();
   if (clockTimer) {
     window.clearInterval(clockTimer);
   }
@@ -664,11 +742,6 @@ function suppressNextHistoryChange() {
   });
 }
 
-function clearUndoHistory() {
-  undoStack.value = [];
-  ignoredHistoryTarget = null;
-}
-
 function undoLastChange() {
   const previous = undoStack.value[undoStack.value.length - 1];
 
@@ -678,7 +751,7 @@ function undoLastChange() {
   }
 
   undoStack.value = undoStack.value.slice(0, -1);
-  ignoredHistoryTarget = previous;
+  activeTab.value.ignoredHistoryTarget = previous;
   suppressNextHistoryChange();
   const result = parseGanttSource(previous);
   doc.value = result.doc;
@@ -698,19 +771,21 @@ async function handleCloseRequested(event: { preventDefault: () => void }) {
 }
 
 async function requestApplicationClose() {
-  if (!isDirty.value) {
+  const dirtyTabs = tabs.value.filter((tab) => isTabDirty(tab) && !isTabEmpty(tab));
+
+  if (!dirtyTabs.length) {
     await forceCloseWindow();
     return;
   }
 
-  const result = await message("当前文件尚未保存。关闭前要保存吗？", {
+  const result = await message(`存在 ${dirtyTabs.length} 个未保存的标签页。关闭前要保存吗？`, {
     title: "未保存的修改",
     kind: "warning",
-    buttons: { yes: "保存", no: "放弃", cancel: "取消" },
+    buttons: { yes: "保存全部", no: "放弃", cancel: "取消" },
   });
 
-  if (result === "保存" || result === "Yes") {
-    const saved = await saveDocument();
+  if (result === "保存全部" || result === "Yes") {
+    const saved = await saveTabs(dirtyTabs);
 
     if (!saved) {
       return;
@@ -731,19 +806,11 @@ async function forceCloseWindow() {
 }
 
 async function newDocument() {
-  if (isDirty.value && !window.confirm("当前文件尚未保存，确定新建吗？")) {
-    return;
-  }
-
-  suppressNextHistoryChange();
-  doc.value = createBlankDocument();
-  currentPath.value = null;
-  selectTask(doc.value.tasks[0]);
-  warnings.value = [];
-  lastSavedSource.value = serializeGanttDocument(doc.value);
-  clearUndoHistory();
-  refreshSourceDraft();
-  statusMessage.value = "已创建新甘特图";
+  const tab = createDocumentTab(createBlankDocument());
+  tabs.value.push(tab);
+  switchToTab(tab.id);
+  persistOpenedFilePaths();
+  statusMessage.value = "已创建新标签页";
   await nextTick();
   jumpToToday();
 }
@@ -759,62 +826,107 @@ async function openDocument() {
   }
 
   await loadDocumentFromPath(selected);
-  window.localStorage.setItem(LAST_FILE_PATH_KEY, selected);
   await nextTick();
   scrollToTaskRange();
 }
 
-async function loadDocumentFromPath(path: string) {
+async function createTabFromPath(path: string) {
   const content = await invoke<string>("read_gantt_file", { path });
   const result = parseGanttSource(content);
+  result.doc.title = fileStem(path) || result.doc.title;
+  const lastSaved = serializeGanttDocument(result.doc);
 
-  suppressNextHistoryChange();
-  doc.value = result.doc;
-  setTitleFromPath(path);
-  currentPath.value = path;
-  selectTask(doc.value.tasks[0]);
-  warnings.value = result.warnings;
-  lastSavedSource.value = sourceText.value;
-  clearUndoHistory();
-  refreshSourceDraft();
+  return createDocumentTab(result.doc, {
+    path,
+    warnings: result.warnings,
+    lastSavedSource: lastSaved,
+  });
+}
+
+async function loadDocumentFromPath(path: string) {
+  const existingTab = tabs.value.find((tab) => tab.path === path);
+
+  if (existingTab) {
+    switchToTab(existingTab.id);
+    statusMessage.value = `已切换到 ${fileName(path)}`;
+    return;
+  }
+
+  const tab = await createTabFromPath(path);
+  tabs.value.push(tab);
+  switchToTab(tab.id);
+  persistOpenedFilePaths();
   statusMessage.value = `已打开 ${fileName(path)}`;
 }
 
 async function restoreLastOpenedFile() {
-  const path = window.localStorage.getItem(LAST_FILE_PATH_KEY);
+  const paths = readLastOpenedFilePaths();
 
-  if (!path) {
+  if (!paths.length) {
     return false;
   }
 
-  try {
-    await loadDocumentFromPath(path);
-    await nextTick();
-    jumpToToday();
-    return true;
-  } catch {
-    window.localStorage.removeItem(LAST_FILE_PATH_KEY);
-    statusMessage.value = "上次打开的文件不可用，已创建新甘特图";
+  const restoredTabs: DocumentTab[] = [];
+
+  for (const path of paths) {
+    try {
+      restoredTabs.push(await createTabFromPath(path));
+    } catch {
+      // Skip files that are no longer available.
+    }
+  }
+
+  if (!restoredTabs.length) {
+    clearLastOpenedFilePaths();
+    statusMessage.value = "上次打开的文件均不可用，已创建空白工作区";
     return false;
   }
+
+  suppressNextHistoryChange();
+  tabs.value = restoredTabs;
+  const activePath = window.localStorage.getItem(LAST_ACTIVE_FILE_PATH_KEY) ?? window.localStorage.getItem(LAST_FILE_PATH_KEY);
+  activeTabId.value = restoredTabs.find((tab) => tab.path === activePath)?.id ?? restoredTabs[0].id;
+  refreshSourceDraft();
+  persistOpenedFilePaths();
+  statusMessage.value = `已恢复 ${restoredTabs.length} 个标签页`;
+  await nextTick();
+  jumpToToday();
+  return true;
 }
 
 async function saveDocument(): Promise<boolean> {
-  if (!currentPath.value) {
-    return saveDocumentAs();
-  }
-
-  await invoke("write_gantt_file", { path: currentPath.value, content: sourceText.value });
-  lastSavedSource.value = sourceText.value;
-  window.localStorage.setItem(LAST_FILE_PATH_KEY, currentPath.value);
-  const saveCompleted = true;
-  statusMessage.value = `已保存 ${fileName(currentPath.value)}`;
-  return saveCompleted;
+  return saveTab(activeTab.value);
 }
 
-async function saveDocumentAs(): Promise<boolean> {
+async function saveTabs(targetTabs: DocumentTab[]) {
+  for (const tab of targetTabs) {
+    const saved = await saveTab(tab);
+
+    if (!saved) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function saveTab(tab: DocumentTab): Promise<boolean> {
+  if (!tab.path) {
+    return saveTabAs(tab);
+  }
+
+  const content = serializeGanttDocument(tab.doc);
+  await invoke("write_gantt_file", { path: tab.path, content });
+  tab.lastSavedSource = content;
+  tab.sourceDraft = content;
+  persistOpenedFilePaths();
+  statusMessage.value = `已保存 ${fileName(tab.path)}`;
+  return true;
+}
+
+async function saveTabAs(tab: DocumentTab): Promise<boolean> {
   const target = await save({
-    defaultPath: currentPath.value ?? `${safeFileName(doc.value.title)}.mmd`,
+    defaultPath: tab.path ?? `${safeFileName(tab.doc.title)}.mmd`,
     filters: [{ name: "Mermaid Gantt", extensions: ["mmd", "mermaid", "gantt"] }],
   });
 
@@ -822,9 +934,137 @@ async function saveDocumentAs(): Promise<boolean> {
     return false;
   }
 
-  currentPath.value = target;
-  setTitleFromPath(target);
-  return saveDocument();
+  tab.path = target;
+  setTabTitleFromPath(tab, target);
+  return saveTab(tab);
+}
+
+function switchToTab(tabId: string) {
+  if (tabId === activeTabId.value || !tabs.value.some((tab) => tab.id === tabId)) {
+    return;
+  }
+
+  finishSubtaskTextEdit();
+  closeContextMenu();
+  suppressNextHistoryChange();
+  activeTabId.value = tabId;
+  refreshSourceDraft();
+  persistOpenedFilePaths();
+  nextTick(() => {
+    if (doc.value.tasks.length) {
+      scrollToTaskRange();
+    } else {
+      jumpToToday();
+    }
+  });
+}
+
+async function closeTab(tabId: string, event?: MouseEvent) {
+  event?.stopPropagation();
+  const tabIndex = tabs.value.findIndex((tab) => tab.id === tabId);
+  const tab = tabs.value[tabIndex];
+
+  if (!tab) {
+    return;
+  }
+
+  if (isTabDirty(tab) && !isTabEmpty(tab)) {
+    const result = await message(`标签页“${tabLabel(tab)}”尚未保存。关闭前要保存吗？`, {
+      title: "未保存的修改",
+      kind: "warning",
+      buttons: { yes: "保存", no: "放弃", cancel: "取消" },
+    });
+
+    if (result === "保存" || result === "Yes") {
+      const saved = await saveTab(tab);
+
+      if (!saved) {
+        return;
+      }
+    } else if (result !== "放弃" && result !== "No") {
+      return;
+    }
+  }
+
+  tabs.value.splice(tabIndex, 1);
+
+  if (!tabs.value.length) {
+    const blankTab = createDocumentTab(createBlankDocument());
+    tabs.value.push(blankTab);
+    activeTabId.value = blankTab.id;
+  } else if (activeTabId.value === tabId) {
+    activeTabId.value = tabs.value[Math.min(tabIndex, tabs.value.length - 1)].id;
+  }
+
+  closeContextMenu();
+  refreshSourceDraft();
+  persistOpenedFilePaths();
+  statusMessage.value = `已关闭 ${tabLabel(tab)}`;
+}
+
+function isTabDirty(tab: DocumentTab) {
+  return serializeGanttDocument(tab.doc) !== tab.lastSavedSource;
+}
+
+function isTabEmpty(tab: DocumentTab) {
+  return !tab.path && !tab.doc.tasks.length && !tab.doc.sections.length && !tab.doc.directives.length;
+}
+
+function tabLabel(tab: DocumentTab) {
+  return tab.path ? fileStem(tab.path) : tab.doc.title || "未保存";
+}
+
+function readLastOpenedFilePaths() {
+  const rawPaths = window.localStorage.getItem(LAST_FILE_PATHS_KEY);
+
+  if (rawPaths) {
+    try {
+      const paths = JSON.parse(rawPaths);
+
+      if (Array.isArray(paths)) {
+        return uniquePaths(paths.filter((path): path is string => typeof path === "string" && path.trim().length > 0));
+      }
+    } catch {
+      // Fall back to the legacy single path below.
+    }
+  }
+
+  const legacyPath = window.localStorage.getItem(LAST_FILE_PATH_KEY);
+  return legacyPath ? [legacyPath] : [];
+}
+
+function persistOpenedFilePaths() {
+  const paths = uniquePaths(tabs.value.map((tab) => tab.path).filter((path): path is string => Boolean(path)));
+
+  if (paths.length) {
+    window.localStorage.setItem(LAST_FILE_PATHS_KEY, JSON.stringify(paths));
+    const activePath = activeTab.value.path ?? paths[paths.length - 1];
+    window.localStorage.setItem(LAST_ACTIVE_FILE_PATH_KEY, activePath);
+    window.localStorage.setItem(LAST_FILE_PATH_KEY, activePath);
+    return;
+  }
+
+  clearLastOpenedFilePaths();
+}
+
+function clearLastOpenedFilePaths() {
+  window.localStorage.removeItem(LAST_FILE_PATHS_KEY);
+  window.localStorage.removeItem(LAST_ACTIVE_FILE_PATH_KEY);
+  window.localStorage.removeItem(LAST_FILE_PATH_KEY);
+}
+
+function uniquePaths(paths: string[]) {
+  return Array.from(new Set(paths));
+}
+
+function scrollTabStripWheel(event: WheelEvent) {
+  const target = event.currentTarget as HTMLElement | null;
+
+  if (!target) {
+    return;
+  }
+
+  target.scrollLeft += event.deltaX || event.deltaY;
 }
 
 function addTask(sectionId = "") {
@@ -3064,34 +3304,39 @@ function safeFileName(value: string): string {
   );
 }
 
-function setTitleFromPath(path: string) {
-  doc.value.title = fileStem(path) || doc.value.title;
+function setTabTitleFromPath(tab: DocumentTab, path: string) {
+  tab.doc.title = fileStem(path) || tab.doc.title;
 }
 
 function updateDocumentTitle(value: string) {
-  doc.value.title = value.trim() || "未命名甘特图";
-  scheduleTitleRename();
+  const tab = activeTab.value;
+  tab.doc.title = value.trim() || "未命名甘特图";
+  scheduleTitleRename(tab.id);
 }
 
-function scheduleTitleRename() {
-  if (titleRenameTimer) {
-    window.clearTimeout(titleRenameTimer);
+function scheduleTitleRename(tabId: string) {
+  const existing = titleRenameTimers.get(tabId);
+
+  if (existing) {
+    window.clearTimeout(existing);
   }
 
-  titleRenameTimer = window.setTimeout(() => {
-    titleRenameTimer = null;
-    void renameCurrentFileToTitle();
+  const timer = window.setTimeout(() => {
+    titleRenameTimers.delete(tabId);
+    void renameTabFileToTitle(tabId);
   }, 600);
+  titleRenameTimers.set(tabId, timer);
 }
 
-async function renameCurrentFileToTitle() {
-  const path = currentPath.value;
+async function renameTabFileToTitle(tabId: string) {
+  const tab = tabs.value.find((item) => item.id === tabId);
+  const path = tab?.path;
 
-  if (!path) {
+  if (!tab || !path) {
     return;
   }
 
-  const nextPath = `${directoryOf(path)}${safeFileName(doc.value.title)}${fileExtension(path)}`;
+  const nextPath = `${directoryOf(path)}${safeFileName(tab.doc.title)}${fileExtension(path)}`;
 
   if (nextPath === path) {
     return;
@@ -3099,14 +3344,13 @@ async function renameCurrentFileToTitle() {
 
   try {
     await invoke("rename_gantt_file", { from: path, to: nextPath });
-    currentPath.value = nextPath;
-    window.localStorage.setItem(LAST_FILE_PATH_KEY, nextPath);
+    tab.path = nextPath;
+    persistOpenedFilePaths();
     statusMessage.value = `已重命名为 ${fileName(nextPath)}`;
   } catch (error) {
     statusMessage.value = `重命名失败：${String(error)}`;
   }
 }
-
 function loadAppSettings(): AppSettings {
   try {
     const raw = window.localStorage.getItem(APP_SETTINGS_KEY);
@@ -3253,6 +3497,25 @@ function isEditableTarget(target: EventTarget | null) {
             </button>
             <button type="button" class="range-label" title="跳到任务范围" @click="scrollToTaskRange">
               {{ rangeLabel }}
+            </button>
+          </div>
+
+          <div class="file-tabs" aria-label="已打开文件标签页" @wheel.prevent="scrollTabStripWheel">
+            <button
+              v-for="tab in tabs"
+              :key="tab.id"
+              type="button"
+              class="file-tab"
+              :class="{ active: tab.id === activeTabId, dirty: isTabDirty(tab) }"
+              :title="tab.path ?? tabLabel(tab)"
+              @click="switchToTab(tab.id)"
+            >
+              <span class="file-tab-title">{{ tabLabel(tab) }}</span>
+              <span v-if="isTabDirty(tab)" class="file-tab-dot"></span>
+              <span class="file-tab-close" title="关闭标签页" @click.stop="closeTab(tab.id, $event)">×</span>
+            </button>
+            <button type="button" class="new-tab-button" title="新建标签页" @click="newDocument">
+              <Plus :size="16" />
             </button>
           </div>
 
@@ -4130,6 +4393,7 @@ button.primary {
 }
 
 .range-control {
+  flex: 0 0 auto;
   gap: 8px;
 }
 
@@ -4142,7 +4406,83 @@ button.primary {
   padding: 0 14px !important;
 }
 
+.file-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 140px;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.file-tab,
+.new-tab-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.file-tab {
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 180px;
+  min-width: 92px;
+  padding: 0 6px 0 10px;
+}
+
+.file-tab.active {
+  border-color: #9db8ec;
+  background: #eef4ff;
+  color: #1c55c7;
+  font-weight: 700;
+}
+
+.file-tab-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-tab-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #d58b12;
+}
+
+.file-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  color: #697586;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.file-tab-close:hover {
+  background: rgba(31, 43, 58, 0.08);
+  color: #1f2b3a;
+}
+
+.new-tab-button {
+  width: 32px;
+  flex: 0 0 32px;
+  padding: 0;
+}
+
 .scale-tabs {
+  flex: 0 0 auto;
   overflow: hidden;
   border: 1px solid #d8dee8;
   border-radius: 8px;
