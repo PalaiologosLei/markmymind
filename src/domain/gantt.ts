@@ -33,7 +33,6 @@ export interface GanttTask {
   id: string;
   name: string;
   sectionId: string;
-  locked: boolean;
   color: string;
   subtasks: GanttSubtask[];
 }
@@ -406,7 +405,6 @@ export function serializeGanttDocument(doc: GanttDocument): string {
       `    %% markmymind:task ${JSON.stringify({
         id: task.id,
         sectionId: task.sectionId,
-        locked: task.locked,
         color: task.color || DEFAULT_TASK_COLOR,
       })}`,
     );
@@ -478,7 +476,6 @@ export function createTask(
     id: `task-${Date.now().toString(36)}-${index}`,
     name,
     sectionId,
-    locked: false,
     color,
     subtasks: subtaskNames.map((subtaskName, subtaskIndex) =>
       createSubtask(index, subtaskIndex + 1, subtaskName, addDays(start, subtaskIndex), color),
@@ -589,7 +586,6 @@ function parseTaskLine(line: string, sectionId: string, fallbackIndex: number): 
     id,
     name,
     sectionId,
-    locked: false,
     color,
     subtasks: isCustomTask
       ? []
@@ -672,7 +668,6 @@ function applyTaskMetadata(task: GanttTask, meta: Record<string, unknown> | unde
   return {
     ...task,
     sectionId: typeof meta.sectionId === "string" && meta.sectionId ? meta.sectionId : task.sectionId,
-    locked: typeof meta.locked === "boolean" ? meta.locked : task.locked,
     color: typeof meta.color === "string" && meta.color ? meta.color : task.color || DEFAULT_TASK_COLOR,
   };
 }
@@ -715,7 +710,6 @@ function normalizeDocumentStructure(doc: GanttDocument) {
   doc.tasks = doc.tasks.map((task) => ({
     ...task,
     sectionId: sectionIds.has(task.sectionId) ? task.sectionId : "",
-    locked: task.locked === true,
     color: task.color || DEFAULT_TASK_COLOR,
     subtasks: ensureTaskSubtasks(task).map((subtask) => ({
       ...subtask,

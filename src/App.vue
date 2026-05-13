@@ -12,14 +12,11 @@ import {
   Folder,
   FolderOpen,
   GripVertical,
-  Lock,
   LocateFixed,
   PaintBucket,
   Plus,
   Save,
   Settings,
-  Trash2,
-  Unlock,
 } from "lucide-vue-next";
 import {
   addDays,
@@ -63,6 +60,7 @@ interface DragState {
   initialStart: string;
   initialDuration: number;
   initialLinkStarts?: Record<string, string>;
+  proposedStart?: string;
 }
 
 interface PanState {
@@ -379,9 +377,6 @@ const selectedSubtask = computed(() => {
 
   return selectedLinkContext.value?.parent ?? task.subtasks[0] ?? null;
 });
-const selectedTimelineItem = computed<GanttSubtask | GanttLinkedItem | null>(
-  () => selectedLinkContext.value?.link ?? selectedSubtask.value,
-);
 const subtaskDropPreview = computed(() => {
   const drag = dragState.value;
 
@@ -397,14 +392,18 @@ const subtaskDropPreview = computed(() => {
     return null;
   }
 
-  const layouts = buildSubtaskLayouts([...targetTask.subtasks, subtask]);
-  const fallbackWidth = renderedSubtaskWidth(subtask);
-  const layout = layouts.get(subtask.id) ?? {
-    left: dateToX(subtask.start),
-    width: fallbackWidth,
-    height: renderedSubtaskHeight(subtask, fallbackWidth),
+  const previewSubtask = {
+    ...subtask,
+    start: drag.proposedStart ?? subtask.start,
   };
-  const color = subtask.color || targetTask.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR;
+  const layouts = buildSubtaskLayouts([...targetTask.subtasks, previewSubtask]);
+  const fallbackWidth = renderedSubtaskWidth(previewSubtask);
+  const layout = layouts.get(previewSubtask.id) ?? {
+    left: dateToX(previewSubtask.start),
+    width: fallbackWidth,
+    height: renderedSubtaskHeight(previewSubtask, fallbackWidth),
+  };
+  const color = previewSubtask.color || targetTask.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR;
   const previewColor = lightenColor(color, 0.46);
 
   return {
@@ -729,16 +728,6 @@ function applyTaskColorToSubtasks(task: GanttTask) {
   statusMessage.value = "已应用默认颜色";
 }
 
-function deleteSelectedTask() {
-  const task = selectedTask.value;
-
-  if (!task) {
-    return;
-  }
-
-  deleteTask(task);
-}
-
 function deleteTask(task: GanttTask) {
   doc.value.tasks = doc.value.tasks.filter((item) => item.id !== task.id);
   doc.value.outline = doc.value.outline.filter((item) => !(item.type === "task" && item.id === task.id));
@@ -911,10 +900,6 @@ function scrollToTaskRange() {
 }
 
 function beginSubtaskDrag(event: PointerEvent, task: GanttTask, subtask: GanttSubtask, mode: DragMode) {
-  if (task.locked) {
-    return;
-  }
-
   event.preventDefault();
   event.stopPropagation();
   selectSubtask(task, subtask);
@@ -943,10 +928,6 @@ function beginLinkDrag(
   link: GanttLinkedItem,
   mode: DragMode,
 ) {
-  if (task.locked) {
-    return;
-  }
-
   event.preventDefault();
   event.stopPropagation();
   selectSubtask(task, subtask);
@@ -989,14 +970,17 @@ function updateSubtaskDrag(event: PointerEvent) {
   }
 
   subtaskDropTargetId.value = null;
+  const deltaDays = Math.round((event.clientX - drag.startX) / dayWidth.value);
+  const nextStart = addDays(drag.initialStart, deltaDays);
+  drag.proposedStart = nextStart;
+  const targetTask = drag.mode === "move" && drag.kind === "subtask" ? taskFromTimelinePoint(event.clientX, event.clientY) : null;
 
   if (drag.mode === "move" && drag.kind === "subtask") {
-    const targetTask = taskFromTimelinePoint(event.clientX, event.clientY);
     subtaskDropTargetId.value =
-      targetTask && targetTask.id !== task?.id && !targetTask.locked ? targetTask.id : null;
+      targetTask && targetTask.id !== task?.id && !subtaskWouldOverlap(targetTask, subtask.id, nextStart, subtask.duration)
+        ? targetTask.id
+        : null;
   }
-
-  const deltaDays = Math.round((event.clientX - drag.startX) / dayWidth.value);
 
   if (drag.kind === "link" && link) {
     updateLinkedItemDrag(subtask, link, drag, deltaDays);
@@ -1004,17 +988,22 @@ function updateSubtaskDrag(event: PointerEvent) {
   }
 
   if (drag.mode === "move") {
-    subtask.start = addDays(drag.initialStart, deltaDays);
-    subtask.links.forEach((item) => {
-      const initialStart = drag.initialLinkStarts?.[item.id] ?? item.start;
-      item.start = clampLinkStart(subtask, item, addDays(initialStart, deltaDays));
-    });
+    if (
+      (!targetTask || targetTask.id === task?.id) &&
+      task &&
+      !subtaskWouldOverlap(task, subtask.id, nextStart, subtask.duration)
+    ) {
+      moveSubtaskToStart(subtask, drag, nextStart);
+    }
     return;
   }
 
   const requestedDuration = normalizeDuration(drag.initialDuration + deltaDays);
   const minimumDuration = minimumSubtaskDurationForLinks(subtask);
-  subtask.duration = Math.max(requestedDuration, minimumDuration);
+  const nextDuration = Math.max(requestedDuration, minimumDuration);
+  if (task && !subtaskWouldOverlap(task, subtask.id, subtask.start, nextDuration)) {
+    subtask.duration = nextDuration;
+  }
   if (requestedDuration < minimumDuration) {
     statusMessage.value = "请先删除或调整关联项，再继续缩短一级子任务";
   }
@@ -1116,7 +1105,7 @@ function moveDraggedSubtaskToDropTarget(pointer: Pick<DragState, "pointerX" | "p
   const sourceTask = doc.value.tasks.find((task) => task.id === drag.taskId);
   const targetTask = taskFromTimelinePoint(pointer.pointerX, pointer.pointerY);
 
-  if (!sourceTask || !targetTask || sourceTask.id === targetTask.id || targetTask.locked) {
+  if (!sourceTask || !targetTask || sourceTask.id === targetTask.id) {
     return;
   }
 
@@ -1127,9 +1116,39 @@ function moveDraggedSubtaskToDropTarget(pointer: Pick<DragState, "pointerX" | "p
   }
 
   const [subtask] = sourceTask.subtasks.splice(subtaskIndex, 1);
+  const nextStart = drag.proposedStart ?? subtask.start;
+
+  if (subtaskWouldOverlap(targetTask, subtask.id, nextStart, subtask.duration)) {
+    sourceTask.subtasks.splice(subtaskIndex, 0, subtask);
+    statusMessage.value = "目标位置与已有子任务重叠，无法移动";
+    return;
+  }
+
+  moveSubtaskToStart(subtask, drag, nextStart);
   targetTask.subtasks.push(subtask);
   selectSubtask(targetTask, subtask);
   statusMessage.value = `已将子任务 ${subtask.name} 移动到 ${targetTask.name}`;
+}
+
+function moveSubtaskToStart(subtask: GanttSubtask, drag: DragState, start: string) {
+  subtask.start = start;
+  subtask.links.forEach((item) => {
+    const initialStart = drag.initialLinkStarts?.[item.id] ?? item.start;
+    const offset = differenceInDays(drag.initialStart, start);
+    item.start = clampLinkStart(subtask, item, addDays(initialStart, offset));
+  });
+}
+
+function subtaskWouldOverlap(task: GanttTask, subtaskId: string, start: string, duration: number) {
+  const end = addDays(start, normalizeDuration(duration));
+
+  return task.subtasks.some((subtask) => {
+    if (subtask.id === subtaskId) {
+      return false;
+    }
+
+    return start < endDate(subtask) && end > subtask.start;
+  });
 }
 
 function taskFromTimelinePoint(clientX: number, clientY: number) {
@@ -1588,33 +1607,6 @@ function dissolveSectionFromListMenu() {
 
 function toggleSectionCollapsed(section: GanttSection) {
   section.collapsed = !section.collapsed;
-}
-
-function setSelectedTaskSection(event: Event) {
-  const task = selectedTask.value;
-  const target = event.target as HTMLSelectElement;
-
-  if (!task) {
-    return;
-  }
-
-  moveTaskToSection(task, target.value);
-}
-
-function moveTaskToSection(task: GanttTask, sectionId: string) {
-  if (task.sectionId === sectionId) {
-    return;
-  }
-
-  doc.value.outline = doc.value.outline.filter((item) => !(item.type === "task" && item.id === task.id));
-  insertTaskIntoSection(task, sectionId, tasksInSection(sectionId).length);
-
-  if (!sectionId) {
-    doc.value.outline.push({ type: "task", id: task.id });
-  }
-
-  selectTask(task);
-  statusMessage.value = sectionId ? "已移动任务到分组" : "已移动任务到根目录";
 }
 
 function topInsertionIndexForMenu(menu: TaskListMenuState | null) {
@@ -2689,10 +2681,6 @@ function setFirstWeekStart(weekStart: string) {
   statusMessage.value = `已将 ${formatDisplayDate(appSettings.value.firstWeekStart)} 设为第 1 周`;
 }
 
-function toggleTaskLock(task: GanttTask) {
-  task.locked = !task.locked;
-}
-
 function toggleSourcePanel() {
   sourcePanelOpen.value = !sourcePanelOpen.value;
   if (sourcePanelOpen.value) {
@@ -3279,7 +3267,6 @@ function isEditableTarget(target: EventTarget | null) {
                       tabindex="0"
                       class="subtask-bar"
                       :class="{
-                        locked: row.task.locked,
                         selected: subtask.id === selectedSubtaskId,
                         completed: subtask.completed,
                         expanded: isSubtaskExpandedVisible(subtask),
@@ -3383,7 +3370,6 @@ function isEditableTarget(target: EventTarget | null) {
                           tabindex="0"
                           class="subtask-bar link-bar"
                           :class="{
-                            locked: row.task.locked,
                             selected: link.id === selectedSubtaskId,
                             completed: link.completed,
                             expanded: isSubtaskExpandedVisible(link),
@@ -3451,33 +3437,6 @@ function isEditableTarget(target: EventTarget | null) {
           </section>
         </div>
 
-        <footer class="task-inspector">
-          <template v-if="selectedTask">
-            <div class="inspector-field wide">
-              <label>分组</label>
-              <select :value="selectedTask.sectionId" @change="setSelectedTaskSection">
-                <option value="">根目录</option>
-                <option v-for="section in doc.sections" :key="section.id" :value="section.id">
-                  {{ section.name }}
-                </option>
-              </select>
-            </div>
-
-            <div v-if="selectedTimelineItem" class="inspector-field color-field">
-              <label>子任务颜色</label>
-              <input v-model="selectedTimelineItem.color" type="color" />
-            </div>
-
-            <button type="button" class="icon-command" :title="selectedTask.locked ? '解锁' : '锁定'" @click="toggleTaskLock(selectedTask)">
-              <Lock v-if="selectedTask.locked" :size="17" />
-              <Unlock v-else :size="17" />
-            </button>
-
-            <button type="button" class="danger-command" title="删除任务" @click="deleteSelectedTask">
-              <Trash2 :size="17" />
-            </button>
-          </template>
-        </footer>
       </section>
 
       <aside v-if="sourcePanelOpen" class="source-panel">
@@ -4170,9 +4129,7 @@ button.primary {
 
 .name-input,
 .date-input,
-.duration-input,
-.task-inspector input,
-.task-inspector select {
+.duration-input {
   width: 100%;
   min-width: 0;
   height: 30px;
@@ -4200,8 +4157,6 @@ button.primary {
 .name-input:focus,
 .date-input:focus,
 .duration-input:focus,
-.task-inspector input:focus,
-.task-inspector select:focus,
 .name-input.active,
 .date-input.active,
 .duration-input.active {
@@ -4525,11 +4480,6 @@ button.primary {
   padding: 8px 12px;
 }
 
-.subtask-bar.locked {
-  cursor: default;
-  opacity: 0.72;
-}
-
 .link-bar {
   z-index: 3;
   min-width: 42px;
@@ -4729,55 +4679,6 @@ button.primary {
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.45);
   cursor: ew-resize;
-}
-
-.task-inspector {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 72px;
-  padding: 10px 14px;
-  background: #ffffff;
-}
-
-.inspector-field {
-  display: grid;
-  grid-template-columns: auto minmax(96px, 1fr);
-  align-items: center;
-  gap: 8px;
-  min-width: 150px;
-}
-
-.inspector-field.wide {
-  min-width: 220px;
-}
-
-.inspector-field label {
-  color: #68727f;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.color-field {
-  min-width: 170px;
-}
-
-.color-field input {
-  padding: 0;
-}
-
-.icon-command,
-.danger-command {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-}
-
-.danger-command {
-  border-color: #f0c5c2;
-  color: #bb302b;
 }
 
 .source-panel {
