@@ -587,7 +587,7 @@ const subtaskDropPreview = computed(() => {
   const layout = layouts.get(previewSubtask.id) ?? {
     left: dateToX(previewSubtask.start),
     width: fallbackWidth,
-    height: renderedSubtaskHeight(previewSubtask, fallbackWidth),
+    height: renderedSubtaskHeight(previewSubtask, fallbackWidth, true),
   };
   const color = previewSubtask.color || targetTask.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR;
   const previewColor = lightenColor(color, 0.46);
@@ -2949,6 +2949,10 @@ function inclusiveEndDate(item: Pick<GanttSubtask, "start" | "duration">) {
   return addDays(endDate(item), -1);
 }
 
+function shouldWrapCollapsedSubtaskName(subtask: GanttSubtask) {
+  return doc.value.view === "day" && editingSubtaskId.value !== subtask.id && !isSubtaskExpandedVisible(subtask);
+}
+
 function shouldHideDraggedSourceSubtask(task: GanttTask, subtask: GanttSubtask) {
   const drag = dragState.value;
 
@@ -3014,7 +3018,7 @@ function buildTaskLayoutSnapshot(task: GanttTask): TaskLayoutSnapshot {
     const layout = layouts.get(subtask.id) ?? {
       left: dateToX(subtask.start),
       width: baseSubtaskWidth(subtask),
-      height: appSettings.value.collapsedBarHeight,
+      height: renderedSubtaskHeight(subtask, baseSubtaskWidth(subtask), true),
     };
     let groupHeight = layout.height;
 
@@ -3058,7 +3062,7 @@ function buildSubtaskLayouts(subtasks: GanttSubtask[]) {
     layouts.set(subtask.id, {
       left,
       width,
-      height: renderedSubtaskHeight(subtask, width),
+      height: renderedSubtaskHeight(subtask, width, true),
     });
     cursor = left + width;
     previous = subtask;
@@ -3169,13 +3173,18 @@ function renderedSubtaskWidth(subtask: GanttSubtask | GanttLinkedItem) {
   return baseSubtaskWidth(subtask);
 }
 
-function renderedSubtaskHeight(subtask: GanttSubtask | GanttLinkedItem, width: number) {
+function renderedSubtaskHeight(subtask: GanttSubtask | GanttLinkedItem, width: number, wrapCollapsedName = false) {
   if (editingSubtaskId.value === subtask.id) {
     const lineCount = Math.max(3, editingSubtaskText.value.split(/\r?\n/).length);
     return EXPANDED_VERTICAL_PADDING + lineCount * EXPANDED_LINE_HEIGHT;
   }
 
   if (!isSubtaskExpandedVisible(subtask)) {
+    if (wrapCollapsedName && doc.value.view === "day") {
+      const lineCount = wrappedLineCount(subtask.name, width - 38);
+      return Math.max(appSettings.value.collapsedBarHeight, 12 + lineCount * 18);
+    }
+
     return appSettings.value.collapsedBarHeight;
   }
 
@@ -3918,6 +3927,7 @@ function isEditableTarget(target: EventTarget | null) {
                         completed: subtask.completed,
                         expanded: isSubtaskExpandedVisible(subtask),
                         editing: editingSubtaskId === subtask.id,
+                        'wrap-collapsed-name': shouldWrapCollapsedSubtaskName(subtask),
                         'puzzle-out-right': hasPuzzleOut(row.task, subtask),
                         'puzzle-in-left': hasPuzzleIn(row.task, subtask),
                       }"
@@ -5543,6 +5553,20 @@ button.primary {
 .subtask-bar > .primary-line {
   flex: 1 1 auto;
   justify-content: flex-start;
+}
+
+.subtask-bar.wrap-collapsed-name {
+  align-items: flex-start;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.subtask-bar.wrap-collapsed-name > .primary-line,
+.subtask-bar.wrap-collapsed-name .task-name-text {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
 }
 
 .subtask-meta {
