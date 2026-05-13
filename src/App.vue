@@ -48,6 +48,7 @@ import {
 type DragMode = "move" | "resize";
 type DragItemKind = "subtask" | "link";
 type RecurrenceMode = "interval" | "weekly" | "monthly" | "yearly";
+type BoardContentView = "gantt" | "today";
 
 interface DragState {
   kind: DragItemKind;
@@ -175,6 +176,16 @@ interface TaskLayoutSnapshot {
   rowHeight: number;
   puzzleIn: Set<string>;
   puzzleOut: Set<string>;
+}
+
+interface TodayTodoItem {
+  key: string;
+  kind: "subtask" | "link";
+  task: GanttTask;
+  sectionName: string;
+  parent?: GanttSubtask;
+  item: GanttSubtask | GanttLinkedItem;
+  color: string;
 }
 
 interface UnitSegment {
@@ -321,6 +332,7 @@ const warnings = computed<string[]>({
 });
 const sourcePanelOpen = ref(false);
 const settingsPanelOpen = ref(false);
+const boardContentView = ref<BoardContentView>("gantt");
 const sourceDraft = computed<string>({
   get: () => activeTab.value?.sourceDraft ?? "",
   set: (value) => {
@@ -368,6 +380,10 @@ const scaleOptions: Array<{ value: GanttScale; label: string }> = [
   { value: "month", label: "月" },
   { value: "quarter", label: "季" },
   { value: "year", label: "年" },
+];
+const boardViewOptions: Array<{ value: BoardContentView; label: string }> = [
+  { value: "gantt", label: "甘特图视图" },
+  { value: "today", label: "今日待办事项" },
 ];
 const weekdayOptions = [
   { value: 1, label: "周一" },
@@ -493,6 +509,59 @@ const selectedSubtask = computed(() => {
   }
 
   return selectedLinkContext.value?.parent ?? task.subtasks[0] ?? null;
+});
+const todayTodoItems = computed<TodayTodoItem[]>(() => {
+  const today = currentDateIso.value;
+  const items: TodayTodoItem[] = [];
+
+  doc.value.tasks.forEach((task) => {
+    const sectionName = sectionById.value.get(task.sectionId)?.name ?? "";
+
+    task.subtasks.forEach((subtask) => {
+      if (dateInTaskRange(today, subtask)) {
+        items.push({
+          key: `subtask-${subtask.id}`,
+          kind: "subtask",
+          task,
+          sectionName,
+          item: subtask,
+          color: subtask.color || task.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR,
+        });
+      }
+
+      subtask.links.forEach((link) => {
+        if (!dateInTaskRange(today, link)) {
+          return;
+        }
+
+        items.push({
+          key: `link-${link.id}`,
+          kind: "link",
+          task,
+          sectionName,
+          parent: subtask,
+          item: link,
+          color: linkedItemColor(subtask),
+        });
+      });
+    });
+  });
+
+  return items.sort((first, second) => {
+    const taskOrder = doc.value.tasks.indexOf(first.task) - doc.value.tasks.indexOf(second.task);
+
+    if (taskOrder !== 0) {
+      return taskOrder;
+    }
+
+    const startOrder = first.item.start.localeCompare(second.item.start);
+
+    if (startOrder !== 0) {
+      return startOrder;
+    }
+
+    return first.item.name.localeCompare(second.item.name, "zh-Hans-CN");
+  });
 });
 const subtaskDropPreview = computed(() => {
   const drag = dragState.value;
@@ -1189,6 +1258,29 @@ function selectLink(task: GanttTask, parent: GanttSubtask, link: GanttLinkedItem
   selectedSubtaskId.value = link.id;
 }
 
+function setBoardContentView(view: BoardContentView) {
+  if (boardContentView.value === view) {
+    return;
+  }
+
+  finishSubtaskTextEdit();
+  closeContextMenu();
+  dragState.value = null;
+  subtaskDropTargetId.value = null;
+  panState.value = null;
+  boardContentView.value = view;
+
+  if (view === "gantt") {
+    nextTick(() => {
+      if (doc.value.tasks.length) {
+        scrollToTaskRange();
+      } else {
+        jumpToToday();
+      }
+    });
+  }
+}
+
 function handleGlobalKeydown(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
@@ -1205,6 +1297,17 @@ function handleGlobalKeydown(event: KeyboardEvent) {
   }
 
   if (isEditableTarget(event.target)) {
+    return;
+  }
+
+  if (
+    boardContentView.value === "today" &&
+    (((event.ctrlKey || event.metaKey) && ["c", "v"].includes(event.key.toLowerCase())) ||
+      event.key === "Backspace" ||
+      event.key === "Delete")
+  ) {
+    event.preventDefault();
+    statusMessage.value = "今日待办视图仅允许勾选完成状态";
     return;
   }
 
@@ -2830,6 +2933,22 @@ function linkedItemColor(parent: GanttSubtask) {
   return lightenColor(parent.color || appSettings.value.defaultSubtaskColor || DEFAULT_BAR_COLOR, 0.28);
 }
 
+function dateInTaskRange(date: string, item: Pick<GanttSubtask, "start" | "duration">) {
+  return item.start <= date && date < endDate(item);
+}
+
+function todoItemStyle(item: TodayTodoItem) {
+  return {
+    "--todo-color": item.color,
+    "--todo-soft-color": lightenColor(item.color, 0.82),
+    "--todo-text-color": readableTextColor(item.color),
+  };
+}
+
+function inclusiveEndDate(item: Pick<GanttSubtask, "start" | "duration">) {
+  return addDays(endDate(item), -1);
+}
+
 function shouldHideDraggedSourceSubtask(task: GanttTask, subtask: GanttSubtask) {
   const drag = dragState.value;
 
@@ -3569,7 +3688,7 @@ function isEditableTarget(target: EventTarget | null) {
           </div>
         </div>
 
-        <div class="gantt-board" :class="{ empty: showEmptyOpenState }">
+        <div class="gantt-board" :class="{ empty: showEmptyOpenState, 'today-mode': boardContentView === 'today' }">
           <div v-if="showEmptyOpenState" class="empty-open-state">
             <button type="button" class="empty-open-button" @click="openDocument">
               <FolderOpen :size="22" />
@@ -3578,7 +3697,7 @@ function isEditableTarget(target: EventTarget | null) {
           </div>
 
           <aside
-            v-if="!showEmptyOpenState"
+            v-if="!showEmptyOpenState && boardContentView === 'gantt'"
             ref="taskTablePane"
             class="task-table"
             :style="taskTableStyle"
@@ -3587,8 +3706,19 @@ function isEditableTarget(target: EventTarget | null) {
             @contextmenu.prevent="openTaskListBlankMenu"
           >
             <div class="task-header" :style="taskHeaderStyle">
-              <span class="index-cell"></span>
-              <span>任务 / 分组</span>
+              <div class="board-view-tabs" role="tablist" aria-label="内容视图">
+                <button
+                  v-for="option in boardViewOptions"
+                  :key="option.value"
+                  type="button"
+                  role="tab"
+                  :aria-selected="boardContentView === option.value"
+                  :class="{ active: boardContentView === option.value }"
+                  @click.stop="setBoardContentView(option.value)"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
             </div>
 
             <div class="task-rows" :class="{ 'drop-at-end': taskListDropTarget?.indicator === 'end' }">
@@ -3668,7 +3798,7 @@ function isEditableTarget(target: EventTarget | null) {
           </aside>
 
           <section
-            v-if="!showEmptyOpenState"
+            v-if="!showEmptyOpenState && boardContentView === 'gantt'"
             ref="timelinePane"
             class="timeline-pane"
             :class="{ 'has-week-axis': weekNumberAxisVisible }"
@@ -3949,6 +4079,81 @@ function isEditableTarget(target: EventTarget | null) {
                     </template>
                   </template>
                 </div>
+              </div>
+            </div>
+          </section>
+
+          <section v-else-if="!showEmptyOpenState" class="today-todo-view" aria-label="今日待办事项">
+            <header class="today-todo-header">
+              <div class="board-view-tabs" role="tablist" aria-label="内容视图">
+                <button
+                  v-for="option in boardViewOptions"
+                  :key="option.value"
+                  type="button"
+                  role="tab"
+                  :aria-selected="boardContentView === option.value"
+                  :class="{ active: boardContentView === option.value }"
+                  @click.stop="setBoardContentView(option.value)"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+              <div class="today-todo-summary">
+                <span>{{ formatDisplayDate(currentDateIso) }}</span>
+                <strong>{{ todayTodoItems.length }} 项</strong>
+              </div>
+            </header>
+
+            <div class="today-todo-content">
+              <div v-if="todayTodoItems.length" class="today-todo-list">
+                <article
+                  v-for="todo in todayTodoItems"
+                  :key="todo.key"
+                  class="today-todo-card"
+                  :class="{ completed: todo.item.completed }"
+                  :style="todoItemStyle(todo)"
+                >
+                  <label class="today-todo-primary">
+                    <input
+                      type="checkbox"
+                      :checked="todo.item.completed"
+                      aria-label="标记今日任务完成"
+                      @change="setSubtaskCompleted(todo.item, $event)"
+                    />
+                    <span class="today-todo-color"></span>
+                    <span class="today-todo-name" :class="{ completed: todo.item.completed }">{{ todo.item.name }}</span>
+                  </label>
+
+                  <div class="today-todo-meta">
+                    <span>{{ todo.kind === "link" ? "关联项" : "一级子任务" }}</span>
+                    <span>{{ todo.task.name }}</span>
+                    <span v-if="todo.parent">来自 {{ todo.parent.name }}</span>
+                    <span v-if="todo.sectionName">{{ todo.sectionName }}</span>
+                    <span>{{ formatDisplayDate(todo.item.start) }} - {{ formatDisplayDate(inclusiveEndDate(todo.item)) }}</span>
+                  </div>
+
+                  <div v-if="todo.item.children.length" class="today-todo-children">
+                    <label
+                      v-for="child in todo.item.children"
+                      :key="child.id"
+                      class="today-todo-child"
+                      :class="{ completed: child.completed }"
+                    >
+                      <input
+                        type="checkbox"
+                        :checked="child.completed"
+                        aria-label="标记子待办完成"
+                        @change="setSecondLevelCompleted(child, $event)"
+                      />
+                      <span>{{ child.name }}</span>
+                    </label>
+                  </div>
+                </article>
+              </div>
+
+              <div v-else class="today-todo-empty">
+                <strong>今天没有待办事项</strong>
+                <span>持续时间包含今天的一级子任务和关联项会显示在这里。</span>
               </div>
             </div>
           </section>
@@ -4549,6 +4754,10 @@ button.primary {
   border-bottom: 1px solid #dbe1ea;
 }
 
+.gantt-board.today-mode {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .gantt-board.empty {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -4599,7 +4808,7 @@ button.primary {
 }
 
 .task-header {
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .task-row {
@@ -4622,6 +4831,38 @@ button.primary {
   background: #ffffff;
   font-size: 13px;
   font-weight: 700;
+}
+
+.board-view-tabs {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid #d8e0eb;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.board-view-tabs button {
+  min-width: 0;
+  height: 34px;
+  border: 0;
+  border-radius: 0;
+  padding: 0 8px;
+  background: transparent;
+  color: #53606e;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.board-view-tabs button + button {
+  border-left: 1px solid #d8e0eb;
+}
+
+.board-view-tabs button.active {
+  background: #eaf1ff;
+  color: #1f5bd7;
 }
 
 .task-row {
@@ -4814,6 +5055,171 @@ button.primary {
   height: 38px;
   margin: 10px 12px;
   justify-content: center;
+}
+
+.today-todo-view {
+  grid-column: 1 / -1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: #f7f9fc;
+}
+
+.today-todo-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 76px;
+  border-bottom: 1px solid #dbe1ea;
+  padding: 0 18px;
+  background: #ffffff;
+}
+
+.today-todo-header .board-view-tabs {
+  width: min(320px, 52vw);
+  flex: 0 0 auto;
+}
+
+.today-todo-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #667280;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.today-todo-summary strong {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  border-radius: 999px;
+  padding: 0 10px;
+  background: #eef4ff;
+  color: #1f5bd7;
+}
+
+.today-todo-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+}
+
+.today-todo-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+
+.today-todo-card {
+  --todo-color: #9ac7ff;
+  --todo-soft-color: #eef6ff;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid rgba(133, 151, 173, 0.28);
+  border-left: 6px solid var(--todo-color);
+  border-radius: 8px;
+  padding: 13px 14px;
+  background: var(--todo-soft-color);
+  box-shadow: 0 8px 22px rgba(24, 39, 60, 0.06);
+}
+
+.today-todo-card.completed {
+  opacity: 0.62;
+}
+
+.today-todo-primary,
+.today-todo-child {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  color: #1d2b3a;
+  font-weight: 800;
+}
+
+.today-todo-primary input,
+.today-todo-child input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: #55c979;
+}
+
+.today-todo-color {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  background: var(--todo-color);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.42);
+}
+
+.today-todo-name,
+.today-todo-child span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.today-todo-name.completed,
+.today-todo-child.completed span {
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  opacity: 0.72;
+}
+
+.today-todo-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #617083;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.today-todo-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border-radius: 999px;
+  padding: 0 8px;
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.today-todo-children {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid rgba(133, 151, 173, 0.22);
+  padding-top: 10px;
+}
+
+.today-todo-child {
+  font-weight: 700;
+}
+
+.today-todo-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 260px;
+  color: #6b7582;
+  text-align: center;
+}
+
+.today-todo-empty strong {
+  color: #1f2b3a;
+  font-size: 18px;
 }
 
 .timeline-pane {
