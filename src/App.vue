@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { message, open, save } from "@tauri-apps/plugin-dialog";
 import {
   BookOpen,
   Check,
@@ -626,7 +626,6 @@ watch(sourceText, (next, previous) => {
 onMounted(async () => {
   window.addEventListener("keydown", handleGlobalKeydown);
   window.addEventListener("pointermove", updateLastPointerPosition);
-  window.addEventListener("beforeunload", handleBeforeUnload);
   closeUnlisten = await getCurrentWindow().onCloseRequested(handleCloseRequested);
   currentNow.value = new Date();
   clockTimer = window.setInterval(() => {
@@ -644,7 +643,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleGlobalKeydown);
   window.removeEventListener("pointermove", updateLastPointerPosition);
-  window.removeEventListener("beforeunload", handleBeforeUnload);
   closeUnlisten?.();
   if (titleRenameTimer) {
     window.clearTimeout(titleRenameTimer);
@@ -689,31 +687,44 @@ function undoLastChange() {
   statusMessage.value = "已撤销上一步操作";
 }
 
-function handleBeforeUnload(event: BeforeUnloadEvent) {
-  if (!isDirty.value) {
+async function handleCloseRequested(event: { preventDefault: () => void }) {
+  if (closingAfterPrompt) {
     return;
   }
 
   event.preventDefault();
-  event.returnValue = "";
+  await requestApplicationClose();
 }
 
-async function handleCloseRequested(event: { preventDefault: () => void }) {
-  if (closingAfterPrompt || !isDirty.value) {
+async function requestApplicationClose() {
+  if (!isDirty.value) {
+    await forceCloseWindow();
     return;
   }
 
-  event.preventDefault();
-  const shouldSave = window.confirm("当前文件尚未保存。点击“确定”保存后退出，点击“取消”放弃修改并退出。");
+  const result = await message("当前文件尚未保存。关闭前要保存吗？", {
+    title: "未保存的修改",
+    kind: "warning",
+    buttons: { yes: "保存", no: "放弃", cancel: "取消" },
+  });
 
-  if (shouldSave) {
+  if (result === "保存" || result === "Yes") {
     const saved = await saveDocument();
 
     if (!saved) {
       return;
     }
+
+    await forceCloseWindow();
+    return;
   }
 
+  if (result === "放弃" || result === "No") {
+    await forceCloseWindow();
+  }
+}
+
+async function forceCloseWindow() {
   closingAfterPrompt = true;
   await getCurrentWindow().destroy();
 }
