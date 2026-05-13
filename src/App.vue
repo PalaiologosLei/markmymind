@@ -262,54 +262,71 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
 };
 
 let tabIdSeed = 0;
-const initialTab = createDocumentTab(createBlankDocument());
-const tabs = ref<DocumentTab[]>([initialTab]);
-const activeTabId = ref(initialTab.id);
-const activeTab = computed<DocumentTab>(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? tabs.value[0]);
+let emptyWorkspaceDoc = createBlankDocument();
+const tabs = ref<DocumentTab[]>([]);
+const activeTabId = ref("");
+const activeTab = computed<DocumentTab | null>(() => tabs.value.find((tab) => tab.id === activeTabId.value) ?? null);
 const doc = computed<GanttDocument>({
-  get: () => activeTab.value.doc,
+  get: () => activeTab.value?.doc ?? emptyWorkspaceDoc,
   set: (value) => {
-    activeTab.value.doc = value;
+    if (activeTab.value) {
+      activeTab.value.doc = value;
+      return;
+    }
+
+    emptyWorkspaceDoc = value;
   },
 });
 const appSettings = ref<AppSettings>(loadAppSettings());
 const currentPath = computed<string | null>({
-  get: () => activeTab.value.path,
+  get: () => activeTab.value?.path ?? null,
   set: (value) => {
-    activeTab.value.path = value;
+    if (activeTab.value) {
+      activeTab.value.path = value;
+    }
   },
 });
 const lastSavedSource = computed<string>({
-  get: () => activeTab.value.lastSavedSource,
+  get: () => activeTab.value?.lastSavedSource ?? serializeGanttDocument(emptyWorkspaceDoc),
   set: (value) => {
-    activeTab.value.lastSavedSource = value;
+    if (activeTab.value) {
+      activeTab.value.lastSavedSource = value;
+    }
   },
 });
 const selectedTaskId = computed<string>({
-  get: () => activeTab.value.selectedTaskId,
+  get: () => activeTab.value?.selectedTaskId ?? "",
   set: (value) => {
-    activeTab.value.selectedTaskId = value;
+    if (activeTab.value) {
+      activeTab.value.selectedTaskId = value;
+    }
   },
 });
 const selectedSubtaskId = computed<string>({
-  get: () => activeTab.value.selectedSubtaskId,
+  get: () => activeTab.value?.selectedSubtaskId ?? "",
   set: (value) => {
-    activeTab.value.selectedSubtaskId = value;
+    if (activeTab.value) {
+      activeTab.value.selectedSubtaskId = value;
+    }
   },
 });
 const statusMessage = ref("已创建新甘特图");
 const warnings = computed<string[]>({
-  get: () => activeTab.value.warnings,
+  get: () => activeTab.value?.warnings ?? [],
   set: (value) => {
-    activeTab.value.warnings = value;
+    if (activeTab.value) {
+      activeTab.value.warnings = value;
+    }
   },
 });
 const sourcePanelOpen = ref(false);
 const settingsPanelOpen = ref(false);
 const sourceDraft = computed<string>({
-  get: () => activeTab.value.sourceDraft,
+  get: () => activeTab.value?.sourceDraft ?? "",
   set: (value) => {
-    activeTab.value.sourceDraft = value;
+    if (activeTab.value) {
+      activeTab.value.sourceDraft = value;
+    }
   },
 });
 const dragState = ref<DragState | null>(null);
@@ -330,9 +347,11 @@ const subtaskTextEditor = ref<HTMLTextAreaElement | null>(null);
 const copiedSubtask = ref<GanttSubtask | null>(null);
 const currentNow = ref(new Date());
 const undoStack = computed<string[]>({
-  get: () => activeTab.value.undoStack,
+  get: () => activeTab.value?.undoStack ?? [],
   set: (value) => {
-    activeTab.value.undoStack = value;
+    if (activeTab.value) {
+      activeTab.value.undoStack = value;
+    }
   },
 });
 const lastPointerPosition = ref({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
@@ -383,7 +402,7 @@ function createDocumentTab(
 const sourceText = computed(() => serializeGanttDocument(doc.value));
 const isDirty = computed(() => sourceText.value !== lastSavedSource.value);
 const sidePanelOpen = computed(() => sourcePanelOpen.value || settingsPanelOpen.value);
-const showEmptyOpenState = computed(() => !currentPath.value && doc.value.tasks.length === 0);
+const showEmptyOpenState = computed(() => tabs.value.length === 0);
 const sectionById = computed(() => new Map(doc.value.sections.map((section) => [section.id, section])));
 const taskListRows = computed<TaskListRow[]>(() => {
   const rows: TaskListRow[] = [];
@@ -687,8 +706,14 @@ watch(
 );
 
 watch(sourceText, (next, previous) => {
-  if (next === activeTab.value.ignoredHistoryTarget) {
-    activeTab.value.ignoredHistoryTarget = null;
+  const tab = activeTab.value;
+
+  if (!tab) {
+    return;
+  }
+
+  if (next === tab.ignoredHistoryTarget) {
+    tab.ignoredHistoryTarget = null;
     return;
   }
 
@@ -751,7 +776,9 @@ function undoLastChange() {
   }
 
   undoStack.value = undoStack.value.slice(0, -1);
-  activeTab.value.ignoredHistoryTarget = previous;
+  if (activeTab.value) {
+    activeTab.value.ignoredHistoryTarget = previous;
+  }
   suppressNextHistoryChange();
   const result = parseGanttSource(previous);
   doc.value = result.doc;
@@ -895,7 +922,14 @@ async function restoreLastOpenedFile() {
 }
 
 async function saveDocument(): Promise<boolean> {
-  return saveTab(activeTab.value);
+  const tab = activeTab.value;
+
+  if (!tab) {
+    statusMessage.value = "没有可保存的标签页";
+    return true;
+  }
+
+  return saveTab(tab);
 }
 
 async function saveTabs(targetTabs: DocumentTab[]) {
@@ -989,9 +1023,7 @@ async function closeTab(tabId: string, event?: MouseEvent) {
   tabs.value.splice(tabIndex, 1);
 
   if (!tabs.value.length) {
-    const blankTab = createDocumentTab(createBlankDocument());
-    tabs.value.push(blankTab);
-    activeTabId.value = blankTab.id;
+    activeTabId.value = "";
   } else if (activeTabId.value === tabId) {
     activeTabId.value = tabs.value[Math.min(tabIndex, tabs.value.length - 1)].id;
   }
@@ -1038,7 +1070,7 @@ function persistOpenedFilePaths() {
 
   if (paths.length) {
     window.localStorage.setItem(LAST_FILE_PATHS_KEY, JSON.stringify(paths));
-    const activePath = activeTab.value.path ?? paths[paths.length - 1];
+    const activePath = activeTab.value?.path ?? paths[paths.length - 1];
     window.localStorage.setItem(LAST_ACTIVE_FILE_PATH_KEY, activePath);
     window.localStorage.setItem(LAST_FILE_PATH_KEY, activePath);
     return;
@@ -3310,6 +3342,11 @@ function setTabTitleFromPath(tab: DocumentTab, path: string) {
 
 function updateDocumentTitle(value: string) {
   const tab = activeTab.value;
+
+  if (!tab) {
+    return;
+  }
+
   tab.doc.title = value.trim() || "未命名甘特图";
   scheduleTitleRename(tab.id);
 }
