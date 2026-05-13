@@ -22,8 +22,8 @@ import {
 import {
   addDays,
   addMonths,
+  createBlankDocument,
   createSection,
-  createSampleDocument,
   createSubtask,
   createTask,
   differenceInDays,
@@ -246,7 +246,7 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   defaultSubtaskDuration: 1,
 };
 
-const doc = ref<GanttDocument>(createSampleDocument());
+const doc = ref<GanttDocument>(createBlankDocument());
 const appSettings = ref<AppSettings>(loadAppSettings());
 const currentPath = ref<string | null>(null);
 const lastSavedSource = ref(serializeGanttDocument(doc.value));
@@ -304,6 +304,7 @@ const weekdayOptions = [
 const sourceText = computed(() => serializeGanttDocument(doc.value));
 const isDirty = computed(() => sourceText.value !== lastSavedSource.value);
 const sidePanelOpen = computed(() => sourcePanelOpen.value || settingsPanelOpen.value);
+const showEmptyOpenState = computed(() => !currentPath.value && doc.value.tasks.length === 0);
 const sectionById = computed(() => new Map(doc.value.sections.map((section) => [section.id, section])));
 const taskListRows = computed<TaskListRow[]>(() => {
   const rows: TaskListRow[] = [];
@@ -735,7 +736,7 @@ async function newDocument() {
   }
 
   suppressNextHistoryChange();
-  doc.value = createSampleDocument();
+  doc.value = createBlankDocument();
   currentPath.value = null;
   selectTask(doc.value.tasks[0]);
   warnings.value = [];
@@ -3268,8 +3269,16 @@ function isEditableTarget(target: EventTarget | null) {
           </div>
         </div>
 
-        <div class="gantt-board">
+        <div class="gantt-board" :class="{ empty: showEmptyOpenState }">
+          <div v-if="showEmptyOpenState" class="empty-open-state">
+            <button type="button" class="empty-open-button" @click="openDocument">
+              <FolderOpen :size="22" />
+              <span>打开文件</span>
+            </button>
+          </div>
+
           <aside
+            v-if="!showEmptyOpenState"
             ref="taskTablePane"
             class="task-table"
             :style="taskTableStyle"
@@ -3359,6 +3368,7 @@ function isEditableTarget(target: EventTarget | null) {
           </aside>
 
           <section
+            v-if="!showEmptyOpenState"
             ref="timelinePane"
             class="timeline-pane"
             :class="{ 'has-week-axis': weekNumberAxisVisible }"
@@ -4153,12 +4163,46 @@ button.primary {
 }
 
 .gantt-board {
+  position: relative;
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
   min-height: 0;
   flex: 1;
   overflow: hidden;
   border-bottom: 1px solid #dbe1ea;
+}
+
+.gantt-board.empty {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
+  background: #ffffff;
+}
+
+.empty-open-state {
+  display: grid;
+  place-items: center;
+}
+
+.empty-open-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  border-color: #b9c7da;
+  border-radius: 8px;
+  padding: 0 22px;
+  background: #ffffff;
+  color: #1f2b3a;
+  font-size: 15px;
+  font-weight: 700;
+  box-shadow: 0 10px 30px rgba(28, 45, 69, 0.08);
+}
+
+.empty-open-button:hover {
+  border-color: #7fa2db;
+  background: #f7faff;
+  color: #1c55c7;
 }
 
 .task-table {

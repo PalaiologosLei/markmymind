@@ -208,6 +208,21 @@ export function createSampleDocument(): GanttDocument {
   };
 }
 
+export function createBlankDocument(): GanttDocument {
+  return {
+    title: "计划表",
+    dateFormat: "YYYY-MM-DD",
+    axisFormat: "%m/%d",
+    excludes: "",
+    todayMarker: "stroke-width:2px,stroke:#5b7cfa,opacity:0.85",
+    view: "month",
+    sections: [],
+    tasks: [],
+    outline: [],
+    directives: [],
+  };
+}
+
 export function parseGanttSource(source: string): GanttParseResult {
   const warnings: string[] = [];
   const doc = createSampleDocument();
