@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   BookOpen,
@@ -109,6 +110,16 @@ interface RecurrenceDialogState {
   yearlyDatesText: string;
   untilYear: number;
   message: string;
+}
+
+interface ConfirmDialogState {
+  x: number;
+  y: number;
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  onConfirm: () => void;
 }
 
 type TaskListRow =
@@ -253,6 +264,7 @@ const contextMenu = ref<ContextMenuState | null>(null);
 const taskListMenu = ref<TaskListMenuState | null>(null);
 const weekNumberMenu = ref<WeekNumberMenuState | null>(null);
 const recurrenceDialog = ref<RecurrenceDialogState | null>(null);
+const confirmDialog = ref<ConfirmDialogState | null>(null);
 const taskListDrag = ref<TaskListDragState | null>(null);
 const taskListDropTarget = ref<TaskListDropTarget | null>(null);
 const taskTablePane = ref<HTMLElement | null>(null);
@@ -262,9 +274,14 @@ const editingSubtaskText = ref("");
 const subtaskTextEditor = ref<HTMLTextAreaElement | null>(null);
 const copiedSubtask = ref<GanttSubtask | null>(null);
 const currentNow = ref(new Date());
+const undoStack = ref<string[]>([]);
+const lastPointerPosition = ref({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
 let syncingVerticalScroll = false;
 let titleRenameTimer: ReturnType<typeof setTimeout> | null = null;
 let clockTimer: ReturnType<typeof setInterval> | null = null;
+let suppressHistory = false;
+let closeUnlisten: (() => void) | null = null;
+let closingAfterPrompt = false;
 
 const scaleOptions: Array<{ value: GanttScale; label: string }> = [
   { value: "day", label: "天" },
@@ -588,8 +605,23 @@ watch(
   { deep: true },
 );
 
+watch(sourceText, (next, previous) => {
+  if (suppressHistory) {
+    return;
+  }
+
+  if (next === previous) {
+    return;
+  }
+
+  undoStack.value = [...undoStack.value.slice(-2), previous];
+});
+
 onMounted(async () => {
   window.addEventListener("keydown", handleGlobalKeydown);
+  window.addEventListener("pointermove", updateLastPointerPosition);
+  window.addEventListener("beforeunload", handleBeforeUnload);
+  closeUnlisten = await getCurrentWindow().onCloseRequested(handleCloseRequested);
   currentNow.value = new Date();
   clockTimer = window.setInterval(() => {
     currentNow.value = new Date();
@@ -605,6 +637,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleGlobalKeydown);
+  window.removeEventListener("pointermove", updateLastPointerPosition);
+  window.removeEventListener("beforeunload", handleBeforeUnload);
+  closeUnlisten?.();
   if (titleRenameTimer) {
     window.clearTimeout(titleRenameTimer);
   }
@@ -613,16 +648,80 @@ onBeforeUnmount(() => {
   }
 });
 
+function updateLastPointerPosition(event: PointerEvent) {
+  lastPointerPosition.value = { x: event.clientX, y: event.clientY };
+}
+
+function suppressNextHistoryChange() {
+  suppressHistory = true;
+  void nextTick(() => {
+    suppressHistory = false;
+  });
+}
+
+function clearUndoHistory() {
+  undoStack.value = [];
+}
+
+function undoLastChange() {
+  const previous = undoStack.value[undoStack.value.length - 1];
+
+  if (!previous) {
+    statusMessage.value = "没有可撤销的操作";
+    return;
+  }
+
+  undoStack.value = undoStack.value.slice(0, -1);
+  suppressNextHistoryChange();
+  const result = parseGanttSource(previous);
+  doc.value = result.doc;
+  warnings.value = result.warnings;
+  refreshSourceDraft();
+  selectTask(firstVisibleTask());
+  statusMessage.value = "已撤销上一步操作";
+}
+
+function handleBeforeUnload(event: BeforeUnloadEvent) {
+  if (!isDirty.value) {
+    return;
+  }
+
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+async function handleCloseRequested(event: { preventDefault: () => void }) {
+  if (closingAfterPrompt || !isDirty.value) {
+    return;
+  }
+
+  event.preventDefault();
+  const shouldSave = window.confirm("当前文件尚未保存。点击“确定”保存后退出，点击“取消”放弃修改并退出。");
+
+  if (shouldSave) {
+    const saved = await saveDocument();
+
+    if (!saved) {
+      return;
+    }
+  }
+
+  closingAfterPrompt = true;
+  await getCurrentWindow().destroy();
+}
+
 async function newDocument() {
   if (isDirty.value && !window.confirm("当前文件尚未保存，确定新建吗？")) {
     return;
   }
 
+  suppressNextHistoryChange();
   doc.value = createSampleDocument();
   currentPath.value = null;
   selectTask(doc.value.tasks[0]);
   warnings.value = [];
   lastSavedSource.value = serializeGanttDocument(doc.value);
+  clearUndoHistory();
   refreshSourceDraft();
   statusMessage.value = "已创建新甘特图";
   await nextTick();
@@ -649,12 +748,14 @@ async function loadDocumentFromPath(path: string) {
   const content = await invoke<string>("read_gantt_file", { path });
   const result = parseGanttSource(content);
 
+  suppressNextHistoryChange();
   doc.value = result.doc;
   setTitleFromPath(path);
   currentPath.value = path;
   selectTask(doc.value.tasks[0]);
   warnings.value = result.warnings;
   lastSavedSource.value = sourceText.value;
+  clearUndoHistory();
   refreshSourceDraft();
   statusMessage.value = `已打开 ${fileName(path)}`;
 }
@@ -678,31 +779,32 @@ async function restoreLastOpenedFile() {
   }
 }
 
-async function saveDocument() {
+async function saveDocument(): Promise<boolean> {
   if (!currentPath.value) {
-    await saveDocumentAs();
-    return;
+    return saveDocumentAs();
   }
 
   await invoke("write_gantt_file", { path: currentPath.value, content: sourceText.value });
   lastSavedSource.value = sourceText.value;
   window.localStorage.setItem(LAST_FILE_PATH_KEY, currentPath.value);
+  const saveCompleted = true;
   statusMessage.value = `已保存 ${fileName(currentPath.value)}`;
+  return saveCompleted;
 }
 
-async function saveDocumentAs() {
+async function saveDocumentAs(): Promise<boolean> {
   const target = await save({
     defaultPath: currentPath.value ?? `${safeFileName(doc.value.title)}.mmd`,
     filters: [{ name: "Mermaid Gantt", extensions: ["mmd", "mermaid", "gantt"] }],
   });
 
   if (typeof target !== "string") {
-    return;
+    return false;
   }
 
   currentPath.value = target;
   setTitleFromPath(target);
-  await saveDocument();
+  return saveDocument();
 }
 
 function addTask(sectionId = "") {
@@ -803,7 +905,20 @@ function handleGlobalKeydown(event: KeyboardEvent) {
     return;
   }
 
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "n") {
+    event.preventDefault();
+    finishSubtaskTextEdit();
+    void newDocument();
+    return;
+  }
+
   if (isEditableTarget(event.target)) {
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && !event.shiftKey) {
+    event.preventDefault();
+    undoLastChange();
     return;
   }
 
@@ -874,9 +989,19 @@ function deleteSelectedSubtask() {
     return;
   }
 
-  task.subtasks = task.subtasks.filter((item) => item.id !== subtask.id);
-  selectTask(task, task.subtasks[0]);
-  statusMessage.value = `已删除子任务 ${subtask.name}`;
+  if (subtask.links.length > 0) {
+    requestPointConfirm(
+      lastPointerPosition.value.x,
+      lastPointerPosition.value.y,
+      "删除子任务",
+      `子任务“${subtask.name}”包含关联项，确定删除吗？`,
+      "删除",
+      () => removeSubtaskFromTask(task, subtask),
+    );
+    return;
+  }
+
+  removeSubtaskFromTask(task, subtask);
 }
 
 function setScale(scale: GanttScale) {
@@ -1461,6 +1586,41 @@ function closeContextMenu() {
   weekNumberMenu.value = null;
 }
 
+function closeConfirmDialog() {
+  confirmDialog.value = null;
+}
+
+function requestPointConfirm(
+  x: number,
+  y: number,
+  title: string,
+  message: string,
+  confirmLabel: string,
+  onConfirm: () => void,
+) {
+  closeContextMenu();
+  confirmDialog.value = {
+    x: Math.min(Math.max(8, x), Math.max(8, window.innerWidth - 280)),
+    y: Math.min(Math.max(8, y), Math.max(8, window.innerHeight - 180)),
+    title,
+    message,
+    confirmLabel,
+    cancelLabel: "取消",
+    onConfirm,
+  };
+}
+
+function confirmPointAction() {
+  const dialog = confirmDialog.value;
+
+  if (!dialog) {
+    return;
+  }
+
+  confirmDialog.value = null;
+  dialog.onConfirm();
+}
+
 function openTaskListBlankMenu(event: MouseEvent) {
   const target = event.target as HTMLElement;
 
@@ -1557,26 +1717,27 @@ function addSectionFromListMenu() {
 }
 
 function deleteTaskFromListMenu() {
-  const task = taskListMenu.value?.taskId
-    ? doc.value.tasks.find((item) => item.id === taskListMenu.value?.taskId)
-    : null;
+  const menu = taskListMenu.value;
+  const task = menu?.taskId ? doc.value.tasks.find((item) => item.id === menu.taskId) : null;
 
   if (!task) {
     closeContextMenu();
     return;
   }
 
-  if (!window.confirm(`确定删除任务“${task.name}”吗？`)) {
-    closeContextMenu();
-    return;
-  }
-
-  deleteTask(task);
-  closeContextMenu();
+  requestPointConfirm(
+    menu?.x ?? lastPointerPosition.value.x,
+    menu?.y ?? lastPointerPosition.value.y,
+    "删除任务",
+    `确定删除任务“${task.name}”吗？`,
+    "删除",
+    () => deleteTask(task),
+  );
 }
 
 function dissolveSectionFromListMenu() {
-  const sectionId = taskListMenu.value?.sectionId;
+  const menu = taskListMenu.value;
+  const sectionId = menu?.sectionId;
   const section = sectionId ? sectionById.value.get(sectionId) : null;
 
   if (!section) {
@@ -1584,6 +1745,17 @@ function dissolveSectionFromListMenu() {
     return;
   }
 
+  requestPointConfirm(
+    menu?.x ?? lastPointerPosition.value.x,
+    menu?.y ?? lastPointerPosition.value.y,
+    "解散分组",
+    `确定解散分组“${section.name}”吗？分组内任务会移动到根目录。`,
+    "解散",
+    () => dissolveSection(section),
+  );
+}
+
+function dissolveSection(section: GanttSection) {
   const sectionTasks = tasksInSection(section.id);
   const outlineIndex = outlineIndexOfSection(section.id);
 
@@ -1602,7 +1774,6 @@ function dissolveSectionFromListMenu() {
   );
 
   statusMessage.value = `已解散分组 ${section.name}`;
-  closeContextMenu();
 }
 
 function toggleSectionCollapsed(section: GanttSection) {
@@ -1905,6 +2076,23 @@ function deleteSubtaskFromContext() {
     return;
   }
 
+  if (subtask.links.length > 0) {
+    const menu = contextMenu.value;
+    requestPointConfirm(
+      menu?.x ?? lastPointerPosition.value.x,
+      menu?.y ?? lastPointerPosition.value.y,
+      "删除子任务",
+      `子任务“${subtask.name}”包含关联项，确定删除吗？`,
+      "删除",
+      () => removeSubtaskFromTask(task, subtask),
+    );
+    return;
+  }
+
+  removeSubtaskFromTask(task, subtask);
+}
+
+function removeSubtaskFromTask(task: GanttTask, subtask: GanttSubtask) {
   task.subtasks = task.subtasks.filter((item) => item.id !== subtask.id);
   selectTask(task, task.subtasks[0]);
   statusMessage.value = `已删除子任务 ${subtask.name}`;
@@ -3643,6 +3831,20 @@ function isEditableTarget(target: EventTarget | null) {
       <button type="button" @click="applyWeekNumberAnchor">设为第 1 周</button>
     </div>
 
+    <div
+      v-if="confirmDialog"
+      class="confirm-popover"
+      :style="{ left: `${confirmDialog.x}px`, top: `${confirmDialog.y}px` }"
+      @click.stop
+    >
+      <strong>{{ confirmDialog.title }}</strong>
+      <p>{{ confirmDialog.message }}</p>
+      <div>
+        <button type="button" @click="closeConfirmDialog">{{ confirmDialog.cancelLabel }}</button>
+        <button type="button" class="danger" @click="confirmPointAction">{{ confirmDialog.confirmLabel }}</button>
+      </div>
+    </div>
+
     <div v-if="recurrenceDialog" class="modal-backdrop" @click.self="closeRecurrenceDialog">
       <form class="recurrence-dialog" @submit.prevent="applyRecurrenceDialog" @click.stop>
         <header>
@@ -4823,6 +5025,51 @@ button.primary {
 
 .task-list-menu {
   width: 160px;
+}
+
+.confirm-popover {
+  position: fixed;
+  z-index: 31;
+  display: grid;
+  width: 260px;
+  max-width: calc(100vw - 24px);
+  gap: 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+  box-shadow: 0 16px 42px rgba(20, 31, 48, 0.22);
+  transform: translate(6px, 6px);
+}
+
+.confirm-popover strong {
+  color: #1f2b3a;
+  font-size: 14px;
+}
+
+.confirm-popover p {
+  margin: 0;
+  color: #465364;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.confirm-popover div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.confirm-popover button {
+  height: 30px;
+  border-radius: 6px;
+  padding: 0 12px;
+}
+
+.confirm-popover button.danger {
+  border-color: #f2b8b8;
+  background: #fff4f4;
+  color: #c62929;
 }
 
 .modal-backdrop {
