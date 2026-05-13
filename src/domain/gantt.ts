@@ -210,7 +210,7 @@ export function createSampleDocument(): GanttDocument {
 
 export function createBlankDocument(): GanttDocument {
   return {
-    title: "计划表",
+    title: "新甘特图",
     dateFormat: "YYYY-MM-DD",
     axisFormat: "%m/%d",
     excludes: "",
@@ -320,7 +320,7 @@ export function parseGanttSource(source: string): GanttParseResult {
       }
 
       if (trimmed.startsWith("section ")) {
-        currentSection = ensureSection(doc, trimmed.slice("section ".length).trim() || "默认分组");
+        currentSection = ensureSection(doc, trimmed.slice("section ".length).trim() || "新分组");
         doc.outline.push({ type: "section", id: currentSection.id });
         lastSection = currentSection;
         lastTask = null;
@@ -448,7 +448,7 @@ export function serializeGanttDocument(doc: GanttDocument): string {
         return;
       }
 
-      lines.push(`    section ${sanitizeLine(section.name || "默认分组")}`);
+      lines.push(`    section ${sanitizeLine(section.name || "新分组")}`);
       lines.push(
         `    %% markmymind:section ${JSON.stringify({
           id: section.id,
@@ -501,7 +501,7 @@ export function createTask(
 export function createSubtask(
   taskIndex: number,
   subtaskIndex: number,
-  name = "子任务",
+  name = "新子任务",
   start = todayIso(),
   color = DEFAULT_SUBTASK_COLOR,
 ): GanttSubtask {
