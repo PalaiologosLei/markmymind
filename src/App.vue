@@ -280,6 +280,7 @@ let syncingVerticalScroll = false;
 let titleRenameTimer: ReturnType<typeof setTimeout> | null = null;
 let clockTimer: ReturnType<typeof setInterval> | null = null;
 let suppressHistory = false;
+let ignoredHistoryTarget: string | null = null;
 let closeUnlisten: (() => void) | null = null;
 let closingAfterPrompt = false;
 
@@ -606,6 +607,11 @@ watch(
 );
 
 watch(sourceText, (next, previous) => {
+  if (next === ignoredHistoryTarget) {
+    ignoredHistoryTarget = null;
+    return;
+  }
+
   if (suppressHistory) {
     return;
   }
@@ -661,6 +667,7 @@ function suppressNextHistoryChange() {
 
 function clearUndoHistory() {
   undoStack.value = [];
+  ignoredHistoryTarget = null;
 }
 
 function undoLastChange() {
@@ -672,6 +679,7 @@ function undoLastChange() {
   }
 
   undoStack.value = undoStack.value.slice(0, -1);
+  ignoredHistoryTarget = previous;
   suppressNextHistoryChange();
   const result = parseGanttSource(previous);
   doc.value = result.doc;
